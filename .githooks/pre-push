@@ -1,0 +1,24 @@
+#!/bin/sh
+# 本地 CI：gofmt + go vet + go test 全绿才许 push；禁止直推 main。
+set -e
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$branch" = "main" ]; then
+	echo "错误：禁止直推 main，请走 feature 分支 + PR" >&2
+	exit 1
+fi
+
+echo "pre-push: gofmt..."
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then
+	echo "gofmt 未格式化文件: $unformatted" >&2
+	exit 1
+fi
+
+echo "pre-push: go vet..."
+go vet ./...
+
+echo "pre-push: go test..."
+go test ./...
+
+echo "pre-push: 全部通过"

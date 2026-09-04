@@ -1,0 +1,14 @@
+{
+  "accounts": [
+    {
+      "name": "do-1",
+      "provider": "digitalocean",
+      "token": "REPLACE_ME_DIGITALOCEAN_PERSONAL_ACCESS_TOKEN"
+    },
+    {
+      "name": "do-2",
+      "provider": "digitalocean",
+      "token": "REPLACE_ME_DIGITALOCEAN_PERSONAL_ACCESS_TOKEN"
+    }
+  ]
+}

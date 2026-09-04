@@ -1,0 +1,8 @@
+# 凭据与本地配置（public 仓库，严禁提交）
+accounts.json
+*.local.json
+.env
+
+# 构建产物
+/bin/
+/vpsctl
