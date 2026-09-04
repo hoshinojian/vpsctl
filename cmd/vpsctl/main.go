@@ -12,7 +12,7 @@ const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean 先行）
 
 用法:
   vpsctl create [flags]             多账号批量创建节点，输出 JSON
-  vpsctl serve [flags]              本地 Web 管理台（开发中）
+  vpsctl serve [flags]              本地 Web 管理台（查看/关机/开机/删除）
   vpsctl regions|sizes|images|keys  查询各账号可选值
 
 子命令帮助: vpsctl <子命令> -h
@@ -34,8 +34,7 @@ func main() {
 	case "create":
 		die(runCreate(os.Args[2:]))
 	case "serve":
-		fmt.Fprintln(os.Stderr, "vpsctl serve: 尚未实现（PR3）")
-		os.Exit(2)
+		die(runServe(os.Args[2:]))
 	case "regions", "sizes", "images", "keys":
 		die(runList(os.Args[1], os.Args[2:]))
 	case "-h", "--help", "help":
