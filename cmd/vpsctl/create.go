@@ -25,6 +25,7 @@ func runCreate(args []string) error {
 	tags := fs.String("tags", "", "逗号分隔的附加 tag（自动追加 batch:<时间戳>）")
 	userData := fs.String("user-data", "", "cloud-init 文件路径")
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
+	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
 	if err := fs.Parse(args); err != nil {
@@ -36,6 +37,11 @@ func runCreate(args []string) error {
 		return err
 	}
 	clients, err := buildClients(cfg)
+	if err != nil {
+		return err
+	}
+
+	clients, err = fleet.SelectClients(clients, splitCSV(*only))
 	if err != nil {
 		return err
 	}

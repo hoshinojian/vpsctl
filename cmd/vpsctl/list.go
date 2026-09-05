@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"text/tabwriter"
+
+	"github.com/hoshinojian/vpsctl/internal/fleet"
 )
 
 // runList 处理 regions/sizes/images/keys 四个查询子命令，
@@ -14,6 +16,7 @@ import (
 func runList(kind string, args []string) error {
 	fs := flag.NewFlagSet(kind, flag.ExitOnError)
 	accounts := fs.String("accounts", "", "账号配置路径（默认 ~/.config/vpsctl/accounts.json，或 $VPSCTL_ACCOUNTS）")
+	only := fs.String("only", "", "逗号分隔的账号名：只查询指定账号（默认全部账号）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -22,6 +25,10 @@ func runList(kind string, args []string) error {
 		return err
 	}
 	clients, err := buildClients(cfg)
+	if err != nil {
+		return err
+	}
+	clients, err = fleet.SelectClients(clients, splitCSV(*only))
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,30 @@ type PlanEntry struct {
 // BatchTag 生成批量标识（UTC 时间戳串），同时用作自动 tag（batch:<id>）。
 func BatchTag(t time.Time) string {
 	return t.UTC().Format("20060102T150405Z")
+}
+
+// SelectClients 按 only 过滤账号客户端；only 为空返回全部。
+// 出现未知账号名时报错并列出可用名。
+func SelectClients(clients []AccountClient, only []string) ([]AccountClient, error) {
+	if len(only) == 0 {
+		return clients, nil
+	}
+	byName := make(map[string]AccountClient, len(clients))
+	names := make([]string, 0, len(clients))
+	for _, c := range clients {
+		byName[c.Name] = c
+		names = append(names, c.Name)
+	}
+	sort.Strings(names)
+	out := make([]AccountClient, 0, len(only))
+	for _, n := range only {
+		c, ok := byName[n]
+		if !ok {
+			return nil, fmt.Errorf("账号 %q 不存在（可用: %s）", n, strings.Join(names, ", "))
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 // Names 生成单账号的节点名序列：{prefix}-{account}-{NN}。
