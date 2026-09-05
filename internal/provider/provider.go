@@ -57,31 +57,31 @@ type ActionRef struct {
 
 // SSHKey 是账号下的公钥。
 type SSHKey struct {
-	ID          string
-	Name        string
-	Fingerprint string
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // Region 是可部署区域。
 type Region struct {
-	Slug string
-	Name string
+	Slug string `json:"slug"`
+	Name string `json:"name"`
 }
 
 // Size 是套餐规格。
 type Size struct {
-	Slug         string
-	VCPUs        int
-	MemoryMB     int
-	DiskGB       int
-	PriceMonthly float64
+	Slug         string  `json:"slug"`
+	VCPUs        int     `json:"vcpus"`
+	MemoryMB     int     `json:"memory_mb"`
+	DiskGB       int     `json:"disk_gb"`
+	PriceMonthly float64 `json:"price_monthly"`
 }
 
 // Image 是系统镜像。
 type Image struct {
-	Slug         string
-	Distribution string
-	Name         string
+	Slug         string `json:"slug"`
+	Distribution string `json:"distribution"`
+	Name         string `json:"name"`
 }
 
 // Provider 是单个账号视角下的提供商客户端，实现需并发安全。

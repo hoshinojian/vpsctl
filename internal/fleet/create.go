@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +76,24 @@ func SelectClients(clients []AccountClient, only []string) ([]AccountClient, err
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// NextStartIndex 返回避免与现有节点重名的下一个序号：
+// 扫描名为 {prefix}-{account}-{NN} 的最大 NN + 1；无匹配时为 1。
+func NextStartIndex(servers []provider.Server, prefix, account string) int {
+	re, err := regexp.Compile("^" + regexp.QuoteMeta(prefix) + "-" + regexp.QuoteMeta(account) + "-(\\d+)$")
+	if err != nil {
+		return 1
+	}
+	max := 0
+	for _, s := range servers {
+		if m := re.FindStringSubmatch(s.Name); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max + 1
 }
 
 // Names 生成单账号的节点名序列：{prefix}-{account}-{NN}。
