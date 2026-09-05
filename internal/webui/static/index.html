@@ -167,6 +167,7 @@ tbody tr:hover { background: #1c2233; }
 <script>
 const $ = id => document.getElementById(id);
 let droplets = [], acctErrors = [];
+let allAccounts = [];        // 配置文件里的全部账号名（含 0 台的）
 const selected = new Set();  // "account/id"
 let toastTimer = null;
 
@@ -174,10 +175,13 @@ const key = d => d.account + '/' + d.id;
 
 async function load() {
   try {
-    const r = await fetch('/api/droplets');
-    const j = await r.json();
-    droplets = j.droplets || [];
-    acctErrors = j.errors || [];
+    const [dr, cat] = await Promise.all([
+      fetch('/api/droplets').then(r => r.json()),
+      fetch('/api/catalog').then(r => r.json()).catch(() => null),
+    ]);
+    droplets = dr.droplets || [];
+    acctErrors = dr.errors || [];
+    if (cat && Array.isArray(cat.accounts) && cat.accounts.length) allAccounts = cat.accounts;
     render();
   } catch (e) { banner('加载失败: ' + e, true); }
 }
@@ -217,11 +221,21 @@ function statusCell(s) {
 }
 
 function render() {
-  fillSelect('f-account', [...new Set(droplets.map(d => d.account))]);
+  // 账号下拉：列出配置里的全部账号（含 0 台的），并标注台数
+  const counts = {};
+  droplets.forEach(d => counts[d.account] = (counts[d.account] || 0) + 1);
+  const accountNames = allAccounts.length ? allAccounts : [...new Set(droplets.map(d => d.account))];
+  const asel = $('f-account'), acur = asel.value;
+  asel.textContent = '';
+  asel.append(new Option('全部账号', ''));
+  accountNames.slice().sort().forEach(a =>
+    asel.append(new Option(`${a}（${counts[a] || 0} 台）`, a)));
+  asel.value = (acur === '' || accountNames.includes(acur)) ? acur : '';
+
   fillSelect('f-region', [...new Set(droplets.map(d => d.region || ''))].filter(Boolean));
 
   const total = droplets.reduce((s, d) => s + (d.price_monthly || 0), 0);
-  $('summary').textContent = `${droplets.length} 台节点 · 合计月费 $${total.toFixed(2)}`
+  $('summary').textContent = `${accountNames.length} 个账号 · ${droplets.length} 台节点 · 合计月费 $${total.toFixed(2)}`
     + (acctErrors.length ? ` · ${acctErrors.length} 个账号查询失败` : '');
 
   const list = filtered();
