@@ -71,6 +71,32 @@ func opts(clients ...AccountClient) Options {
 	}
 }
 
+func TestSelectClients(t *testing.T) {
+	clients := []AccountClient{
+		{Name: "team2"}, {Name: "team3"}, {Name: "team4"},
+	}
+
+	got, err := SelectClients(clients, nil)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("空 only 应返回全部: %v %v", got, err)
+	}
+
+	got, err = SelectClients(clients, []string{"team3"})
+	if err != nil || len(got) != 1 || got[0].Name != "team3" {
+		t.Fatalf("单账号过滤不符: %v %v", got, err)
+	}
+
+	got, err = SelectClients(clients, []string{"team4", "team2"})
+	if err != nil || len(got) != 2 || got[0].Name != "team4" || got[1].Name != "team2" {
+		t.Fatalf("多账号过滤不符: %v %v", got, err)
+	}
+
+	_, err = SelectClients(clients, []string{"team9"})
+	if err == nil || !strings.Contains(err.Error(), "team9") || !strings.Contains(err.Error(), "team2") {
+		t.Fatalf("未知账号应报错并列出可用名: %v", err)
+	}
+}
+
 func TestNames(t *testing.T) {
 	got := Names("vps", "do-1", 1, 3)
 	want := []string{"vps-do-1-01", "vps-do-1-02", "vps-do-1-03"}

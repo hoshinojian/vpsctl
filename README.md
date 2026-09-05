@@ -41,6 +41,7 @@ vpsctl create \
 | 参数 | 说明 |
 | --- | --- |
 | `--count N` | 每个账号创建台数 |
+| `--only team3` | 逗号分隔的账号名，**只在指定账号上创建**（默认全部账号） |
 | `--name-prefix` | 命名前缀，最终名 `{prefix}-{account}-{NN}`（如 `vps-do-1-01`） |
 | `--start-index N` | 序号起始，跨批次避让重名 |
 | `--region/--size/--image` | 必填，slug 可先用 `regions`/`sizes`/`images` 子命令查询 |
@@ -88,6 +89,7 @@ vpsctl serve --listen 127.0.0.1:9000
 ```sh
 vpsctl regions --accounts ~/my-accounts.json
 vpsctl sizes
+vpsctl keys --only team3      # 查询单个账号
 ```
 
 ## 扩展新提供商（Vultr / 阿里云…）
