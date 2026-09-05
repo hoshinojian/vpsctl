@@ -26,6 +26,18 @@ type fakeProvider struct {
 	statusIdx    int
 	deleteErr    map[string]error
 	deletes      []string
+	creates      []provider.CreateRequest
+	regions      []provider.Region
+	sizes        []provider.Size
+	images       []provider.Image
+	keys         []provider.SSHKey
+}
+
+func (f *fakeProvider) Create(_ context.Context, req provider.CreateRequest) (provider.Server, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.creates = append(f.creates, req)
+	return provider.Server{ID: "id-" + req.Name, Name: req.Name, Status: "new", Account: "x"}, nil
 }
 
 func (f *fakeProvider) List(context.Context) ([]provider.Server, error) {
@@ -46,10 +58,6 @@ func (f *fakeProvider) Get(_ context.Context, id string) (provider.Server, error
 		}
 	}
 	return provider.Server{}, fmt.Errorf("no server %s", id)
-}
-
-func (f *fakeProvider) Create(context.Context, provider.CreateRequest) (provider.Server, error) {
-	return provider.Server{}, errors.New("unexpected")
 }
 
 func (f *fakeProvider) Delete(_ context.Context, id string) error {
@@ -83,16 +91,36 @@ func (f *fakeProvider) ActionStatus(_ context.Context, _ provider.ActionRef) (st
 }
 
 func (f *fakeProvider) SSHKeys(context.Context) ([]provider.SSHKey, error) {
-	return nil, errors.New("unexpected")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.keys == nil {
+		return nil, errors.New("keys failed")
+	}
+	return f.keys, nil
 }
 func (f *fakeProvider) Regions(context.Context) ([]provider.Region, error) {
-	return nil, errors.New("unexpected")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.regions == nil {
+		return nil, errors.New("regions failed")
+	}
+	return f.regions, nil
 }
 func (f *fakeProvider) Sizes(context.Context) ([]provider.Size, error) {
-	return nil, errors.New("unexpected")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sizes == nil {
+		return nil, errors.New("sizes failed")
+	}
+	return f.sizes, nil
 }
 func (f *fakeProvider) Images(context.Context) ([]provider.Image, error) {
-	return nil, errors.New("unexpected")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.images == nil {
+		return nil, errors.New("images failed")
+	}
+	return f.images, nil
 }
 
 func testServer(t *testing.T, fps map[string]*fakeProvider) *httptest.Server {
@@ -301,6 +329,100 @@ func TestDeleteShutdownFirst(t *testing.T) {
 			t.Errorf("不应删除: %v", fp.deletes)
 		}
 	})
+}
+
+func TestCreateEndpoint(t *testing.T) {
+	fp := &fakeProvider{servers: []provider.Server{{ID: "1", Name: "vps-team3-03"}}}
+	srv := testServer(t, map[string]*fakeProvider{"team3": fp})
+
+	code, out := postJSON(t, srv.URL+"/api/create", map[string]any{
+		"account": "team3", "count": 2,
+		"region": "sgp1", "size": "s-1vcpu-1gb", "image": "ubuntu-24-04-x64",
+		"ssh_keys": []string{"99"}, "prefix": "vps",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d out=%v", code, out)
+	}
+	created := out["created"].([]any)
+	if len(created) != 2 {
+		t.Fatalf("created = %v", created)
+	}
+	names := []string{created[0].(map[string]any)["name"].(string), created[1].(map[string]any)["name"].(string)}
+	sort.Strings(names)
+	// 现有 vps-team3-03 → 自动从 04 续号
+	if names[0] != "vps-team3-04" || names[1] != "vps-team3-05" {
+		t.Errorf("续号命名不符: %v", names)
+	}
+	fp.mu.Lock()
+	if len(fp.creates) != 2 {
+		t.Errorf("creates = %d", len(fp.creates))
+	}
+	if len(fp.creates) == 2 && (fp.creates[0].Region != "sgp1" || !fp.creates[0].Monitoring) {
+		t.Errorf("creates[0] = %+v", fp.creates[0])
+	}
+	fp.mu.Unlock()
+
+	// 校验失败路径
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"未知账号", map[string]any{"account": "nope", "count": 1, "region": "r", "size": "s", "image": "i"}},
+		{"count 超限", map[string]any{"account": "team3", "count": 51, "region": "r", "size": "s", "image": "i"}},
+		{"count 为 0", map[string]any{"account": "team3", "count": 0, "region": "r", "size": "s", "image": "i"}},
+		{"缺 image", map[string]any{"account": "team3", "count": 1, "region": "r", "size": "s"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _ := postJSON(t, srv.URL+"/api/create", tc.body)
+			if code != http.StatusBadRequest {
+				t.Errorf("应 400, got %d", code)
+			}
+		})
+	}
+}
+
+func TestCatalog(t *testing.T) {
+	fp := &fakeProvider{
+		regions: []provider.Region{{Slug: "sgp1", Name: "Singapore 1"}},
+		sizes:   []provider.Size{{Slug: "s-1vcpu-1gb", VCPUs: 1, MemoryMB: 1024, DiskGB: 25, PriceMonthly: 6}},
+		images:  []provider.Image{{Slug: "ubuntu-24-04-x64", Distribution: "Ubuntu", Name: "24.04 x64"}},
+		keys:    []provider.SSHKey{{ID: "99", Name: "laptop", Fingerprint: "aa:bb"}},
+	}
+	srv := testServer(t, map[string]*fakeProvider{"team3": fp})
+
+	// 无 account：只给账号列表
+	resp, err := http.Get(srv.URL + "/api/catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cat catalogResponse
+	_ = json.NewDecoder(resp.Body).Decode(&cat)
+	resp.Body.Close()
+	if len(cat.Accounts) != 1 || cat.Accounts[0] != "team3" || cat.Regions != nil {
+		t.Errorf("catalog = %+v", cat)
+	}
+
+	// 带 account：返回四类可选值
+	resp, err = http.Get(srv.URL + "/api/catalog?account=team3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat = catalogResponse{}
+	_ = json.NewDecoder(resp.Body).Decode(&cat)
+	resp.Body.Close()
+	if len(cat.Regions) != 1 || len(cat.Sizes) != 1 || len(cat.Images) != 1 || len(cat.Keys) != 1 {
+		t.Errorf("catalog sections = %+v", cat)
+	}
+	if cat.Sizes[0].PriceMonthly != 6 {
+		t.Errorf("sizes = %+v", cat.Sizes)
+	}
+
+	// 未知账号
+	resp2, _ := http.Get(srv.URL + "/api/catalog?account=nope")
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Errorf("未知账号应 400, got %d", resp2.StatusCode)
+	}
+	resp2.Body.Close()
 }
 
 func TestNoTokenLeak(t *testing.T) {

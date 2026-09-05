@@ -97,6 +97,21 @@ func TestSelectClients(t *testing.T) {
 	}
 }
 
+func TestNextStartIndex(t *testing.T) {
+	servers := []provider.Server{
+		{Name: "vps-team3-01"}, {Name: "vps-team3-07"}, {Name: "other-01"},
+	}
+	if got := NextStartIndex(servers, "vps", "team3"); got != 8 {
+		t.Errorf("NextStartIndex = %d, want 8", got)
+	}
+	if got := NextStartIndex(servers, "vps", "team4"); got != 1 {
+		t.Errorf("无同名前缀应为 1, got %d", got)
+	}
+	if got := NextStartIndex(nil, "vps", "team3"); got != 1 {
+		t.Errorf("空列表应为 1, got %d", got)
+	}
+}
+
 func TestNames(t *testing.T) {
 	got := Names("vps", "do-1", 1, 3)
 	want := []string{"vps-do-1-01", "vps-do-1-02", "vps-do-1-03"}

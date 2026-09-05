@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +45,8 @@ func New(clients []fleet.AccountClient) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/droplets", s.handleDroplets)
+	mux.HandleFunc("GET /api/catalog", s.handleCatalog)
+	mux.HandleFunc("POST /api/create", s.handleCreate)
 	mux.HandleFunc("POST /api/power", s.handlePower)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +105,118 @@ type deleteRequest struct {
 }
 
 // ---- handlers ----
+
+// maxCreateCount 限制单次 UI 创建台数，防误操作。
+const maxCreateCount = 50
+
+type createRequest struct {
+	Account string   `json:"account"`
+	Count   int      `json:"count"`
+	Region  string   `json:"region"`
+	Size    string   `json:"size"`
+	Image   string   `json:"image"`
+	SSHKeys []string `json:"ssh_keys"` // 公钥 ID / 指纹
+	Prefix  string   `json:"prefix"`
+}
+
+// handleCreate 在选定账号上创建节点：复用 fleet.Create 编排（命名/批 tag/逐台结果），
+// 起始序号按该账号现有节点自动续号避免重名；不等待就绪，列表刷新可见 new → active。
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Account == "" {
+		httpError(w, http.StatusBadRequest, "account 必填")
+		return
+	}
+	if req.Count < 1 || req.Count > maxCreateCount {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("count 需在 1-%d", maxCreateCount))
+		return
+	}
+	if req.Region == "" || req.Size == "" || req.Image == "" {
+		httpError(w, http.StatusBadRequest, "region/size/image 必填")
+		return
+	}
+	if req.Prefix == "" {
+		req.Prefix = "vps"
+	}
+	clients, err := fleet.SelectClients(s.clients, []string{req.Account})
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	start := 1
+	if servers, err := clients[0].Provider.List(r.Context()); err == nil {
+		start = fleet.NextStartIndex(servers, req.Prefix, req.Account)
+	}
+	res, err := fleet.Create(r.Context(), fleet.Options{
+		Clients: clients, Count: req.Count, Prefix: req.Prefix, StartIndex: start,
+		Region: req.Region, Size: req.Size, Image: req.Image,
+		SSHKeys: req.SSHKeys, Monitoring: true,
+	})
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+type catalogResponse struct {
+	Accounts []string          `json:"accounts"`
+	Regions  []provider.Region `json:"regions,omitempty"`
+	Sizes    []provider.Size   `json:"sizes,omitempty"`
+	Images   []provider.Image  `json:"images,omitempty"`
+	Keys     []provider.SSHKey `json:"keys,omitempty"`
+	Errors   map[string]string `json:"errors,omitempty"`
+}
+
+// handleCatalog 返回创建表单可选值：无 account 参数时只给账号列表；
+// 带账号时并行拉取该账号的 regions/sizes/images/keys（均为只读 API）。
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	account := r.URL.Query().Get("account")
+	names := make([]string, 0, len(s.clients))
+	for _, ac := range s.clients {
+		names = append(names, ac.Name)
+	}
+	sort.Strings(names)
+	resp := catalogResponse{Accounts: names}
+	if account == "" {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	p, ok := s.byAccount[account]
+	if !ok {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("未知账号 %q（可用: %s）", account, strings.Join(names, ", ")))
+		return
+	}
+	var (
+		regions []provider.Region
+		sizes   []provider.Size
+		images  []provider.Image
+		keys    []provider.SSHKey
+	)
+	errs := map[string]string{}
+	var wg sync.WaitGroup
+	run := func(name string, fn func() error) {
+		defer wg.Done()
+		if err := fn(); err != nil {
+			errs[name] = err.Error()
+		}
+	}
+	wg.Add(4)
+	go run("regions", func() error { var e error; regions, e = p.Regions(r.Context()); return e })
+	go run("sizes", func() error { var e error; sizes, e = p.Sizes(r.Context()); return e })
+	go run("images", func() error { var e error; images, e = p.Images(r.Context()); return e })
+	go run("keys", func() error { var e error; keys, e = p.SSHKeys(r.Context()); return e })
+	wg.Wait()
+
+	resp.Regions, resp.Sizes, resp.Images, resp.Keys = regions, sizes, images, keys
+	if len(errs) > 0 {
+		resp.Errors = errs
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
 func (s *Server) handleDroplets(w http.ResponseWriter, r *http.Request) {
 	out := make([][]uiDroplet, len(s.clients))

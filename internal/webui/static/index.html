@@ -23,6 +23,15 @@ button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .4; cursor: default; }
 button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.warn { background: var(--warn); border-color: var(--warn); color: #1c1608; }
+button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 12px 0; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 12px; }
+.form-grid select, .form-grid input { background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+#cr-keys { max-height: 110px; overflow: auto; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  font-size: 13px; margin-top: 4px; }
+#cr-keys .keyrow { display: block; margin: 2px 0; }
 .filters { display: flex; gap: 8px; padding: 12px 20px 0; flex-wrap: wrap; }
 .filters input, .filters select { background: var(--panel); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
@@ -86,6 +95,7 @@ tbody tr:hover { background: #1c2233; }
 
 <div class="toolbar">
   <span id="selinfo">未选择</span>
+  <button id="btn-create">创建节点…</button>
   <button id="btn-poweroff" class="warn" disabled>关机</button>
   <button id="btn-poweron" disabled>开机</button>
   <button id="btn-delete" class="danger" disabled>删除…</button>
@@ -114,6 +124,40 @@ tbody tr:hover { background: #1c2233; }
     <div class="modal-actions">
       <button id="del-cancel">取消</button>
       <button id="del-confirm" class="danger" disabled>彻底删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-create" hidden>
+  <div class="modal">
+    <h2>创建节点</h2>
+    <div class="form-grid">
+      <label>账号
+        <select id="cr-account"></select>
+      </label>
+      <label>台数（1-50）
+        <input id="cr-count" type="number" min="1" max="50" value="1">
+      </label>
+      <label>区域
+        <select id="cr-region"></select>
+      </label>
+      <label>套餐
+        <select id="cr-size"></select>
+      </label>
+      <label>镜像
+        <select id="cr-image"></select>
+      </label>
+      <label>命名前缀（自动续号防重名）
+        <input id="cr-prefix" value="vps">
+      </label>
+    </div>
+    <label style="color:var(--dim);font-size:12px">SSH 公钥（不勾选则不带公钥创建）</label>
+    <div id="cr-keys"></div>
+    <p id="cr-est" class="cost" style="margin:10px 0 0"></p>
+    <p id="cr-msg" style="color:var(--dim);font-size:12px;margin:6px 0 0"></p>
+    <div class="modal-actions">
+      <button id="cr-cancel">取消</button>
+      <button id="cr-submit" class="accent">创建</button>
     </div>
   </div>
 </div>
@@ -304,6 +348,127 @@ $('del-confirm').onclick = async () => {
   });
   selected.clear();
   render();
+};
+
+/* ---- 创建节点 ---- */
+let catalog = null;
+
+async function openCreate() {
+  $('modal-create').hidden = false;
+  $('cr-msg').textContent = '';
+  try {
+    const r = await fetch('/api/catalog');
+    catalog = await r.json();
+  } catch (e) { $('cr-msg').textContent = '加载账号失败: ' + e; return; }
+  const sel = $('cr-account'), cur = sel.value;
+  sel.textContent = '';
+  (catalog.accounts || []).forEach(a => sel.append(new Option(a, a)));
+  if ((catalog.accounts || []).includes(cur)) sel.value = cur;
+  await loadCatalogFor(sel.value);
+}
+
+async function loadCatalogFor(acct) {
+  if (!acct) return;
+  $('cr-msg').textContent = '加载可选值…（首次约数秒）';
+  try {
+    const r = await fetch('/api/catalog?account=' + encodeURIComponent(acct));
+    const j = await r.json();
+    if (!r.ok) { $('cr-msg').textContent = '失败: ' + (j.error || r.status); return; }
+    catalog = Object.assign(catalog || {}, j);
+  } catch (e) { $('cr-msg').textContent = '请求失败: ' + e; return; }
+  const c = catalog;
+
+  const rsel = $('cr-region');
+  rsel.textContent = '';
+  (c.regions || []).forEach(g => rsel.append(new Option(g.slug + ' · ' + g.name, g.slug)));
+
+  const ssel = $('cr-size');
+  ssel.textContent = '';
+  (c.sizes || []).slice().sort((a, b) => a.price_monthly - b.price_monthly)
+    .forEach(s => ssel.append(new Option(
+      `${s.slug} · ${s.vcpus}C/${(s.memory_mb / 1024).toFixed(1)}G/${s.disk_gb}G · $${s.price_monthly}/mo`, s.slug)));
+
+  const isel = $('cr-image');
+  isel.textContent = '';
+  const groups = {};
+  (c.images || []).forEach(im => {
+    const d = im.distribution || '其他';
+    (groups[d] = groups[d] || []).push(im);
+  });
+  Object.keys(groups).sort().forEach(dist => {
+    const og = document.createElement('optgroup');
+    og.label = dist;
+    groups[dist].forEach(im => og.append(new Option(im.slug, im.slug)));
+    isel.append(og);
+  });
+
+  const kd = $('cr-keys');
+  kd.textContent = '';
+  (c.keys || []).forEach(k => {
+    const l = document.createElement('label');
+    l.className = 'keyrow';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true; cb.value = k.id || k.fingerprint;
+    l.append(cb, document.createTextNode(` ${k.name}（${k.fingerprint || k.id}）`));
+    kd.append(l);
+  });
+  if (!(c.keys || []).length) kd.textContent = '该账号没有 SSH 公钥，将不带公钥创建';
+
+  if (Object.keys(c.errors || {}).length) {
+    $('cr-msg').textContent = '部分可选值加载失败: ' + JSON.stringify(c.errors);
+  } else {
+    $('cr-msg').textContent = '';
+  }
+  updateEstimate();
+}
+
+function updateEstimate() {
+  const sizes = (catalog && catalog.sizes) || [];
+  const size = sizes.find(s => s.slug === $('cr-size').value);
+  const n = parseInt($('cr-count').value || '1', 10);
+  $('cr-est').textContent = size
+    ? `预计月费：$${(size.price_monthly * n).toFixed(2)}（$${size.price_monthly.toFixed(2)}/mo × ${n} 台）`
+    : '';
+  $('cr-submit').disabled = !($('cr-account').value && $('cr-region').value
+    && $('cr-size').value && $('cr-image').value && n >= 1);
+}
+
+$('btn-create').onclick = openCreate;
+$('cr-account').onchange = () => loadCatalogFor($('cr-account').value);
+$('cr-size').onchange = updateEstimate;
+$('cr-count').oninput = updateEstimate;
+$('cr-cancel').onclick = () => ($('modal-create').hidden = true);
+$('cr-submit').onclick = async () => {
+  const keys = [...document.querySelectorAll('#cr-keys input:checked')].map(cb => cb.value);
+  const body = {
+    account: $('cr-account').value,
+    count: parseInt($('cr-count').value || '1', 10),
+    region: $('cr-region').value,
+    size: $('cr-size').value,
+    image: $('cr-image').value,
+    ssh_keys: keys,
+    prefix: $('cr-prefix').value || 'vps',
+  };
+  $('cr-submit').disabled = true;
+  $('cr-msg').textContent = '提交中…';
+  try {
+    const r = await fetch('/api/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) { $('cr-msg').textContent = '失败: ' + (j.error || r.status); return; }
+    $('modal-create').hidden = true;
+    const fails = j.errors || [];
+    if (!fails.length) toast(`已提交创建 ${j.created.length} 台，列表稍后自动刷新可见`);
+    else banner(`成功 ${j.created.length} 台，失败 ${fails.length} 台：\n`
+      + fails.map(e => `${e.name}: ${e.error}`).join('\n'), true);
+    await load();
+  } catch (e) {
+    $('cr-msg').textContent = '请求失败: ' + e;
+  } finally {
+    updateEstimate();
+  }
 };
 
 load();
