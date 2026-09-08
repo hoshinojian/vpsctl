@@ -36,10 +36,14 @@ type Client struct {
 	sleep func(ctx context.Context, d time.Duration) error
 }
 
-// New 创建客户端；hc 为 nil 时用 http.DefaultClient。
+// defaultHTTPTimeout 单请求总超时。上游网络挂起（丢包/代理吞连）时
+// 若无超时，List 会永久阻塞，拖死管理台与 CLI。
+const defaultHTTPTimeout = 15 * time.Second
+
+// New 创建客户端；hc 为 nil 时用带超时的默认客户端。
 func New(account, token string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
 		account:    account,

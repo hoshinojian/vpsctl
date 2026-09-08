@@ -265,23 +265,37 @@ let toastTimer = null;
 
 const key = d => d.account + '/' + d.id;
 
+// fetchJSON 带超时的 JSON 请求：单接口挂起最多等 20s，不拖垮整页。
+function fetchJSON(url) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  return fetch(url, { signal: ctl.signal })
+    .then(r => r.json())
+    .finally(() => clearTimeout(timer));
+}
+
 async function load() {
-  try {
-    const [dr, cat, ac] = await Promise.all([
-      fetch('/api/droplets').then(r => r.json()),
-      fetch('/api/catalog').then(r => r.json()).catch(() => null),
-      fetch('/api/accounts').then(r => r.json()).catch(() => null),
-    ]);
-    droplets = dr.droplets || [];
-    acctErrors = dr.errors || [];
-    if (ac && Array.isArray(ac.accounts)) {
-      accountInfo = {};
-      ac.accounts.forEach(a => (accountInfo[a.name] = a));
-      if (ac.accounts.length) allAccounts = ac.accounts.map(a => a.name);
-    }
-    if (cat && Array.isArray(cat.accounts) && cat.accounts.length) allAccounts = cat.accounts;
-    render();
-  } catch (e) { banner('加载失败: ' + e, true); }
+  const [drRes, catRes, acRes] = await Promise.allSettled([
+    fetchJSON('/api/droplets'),
+    fetchJSON('/api/catalog'),
+    fetchJSON('/api/accounts'),
+  ]);
+  if (drRes.status === 'fulfilled') {
+    droplets = drRes.value.droplets || [];
+    acctErrors = drRes.value.errors || [];
+  } else {
+    banner('节点清单加载失败（见浏览器控制台与 serve 终端日志）: '
+      + (drRes.reason && drRes.reason.message ? drRes.reason.message : drRes.reason), true);
+  }
+  if (catRes.status === 'fulfilled' && catRes.value
+    && Array.isArray(catRes.value.accounts) && catRes.value.accounts.length)
+    allAccounts = catRes.value.accounts;
+  if (acRes.status === 'fulfilled' && acRes.value && Array.isArray(acRes.value.accounts)) {
+    accountInfo = {};
+    acRes.value.accounts.forEach(a => (accountInfo[a.name] = a));
+    if (acRes.value.accounts.length) allAccounts = acRes.value.accounts.map(a => a.name);
+  }
+  render();
 }
 
 function filtered() {
