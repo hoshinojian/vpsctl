@@ -676,23 +676,23 @@ $('dt-close').onclick = () => ($('modal-detail').hidden = true);
 function openMaint(prefix) {
   const ds = selDroplets();
   if (!ds.length) return;
-  $(`#${prefix}-count`).textContent = ds.length;
-  $(`#${prefix}-need`).textContent = ds.length;
-  const lst = $(`#${prefix}-list`);
+  $(`${prefix}-count`).textContent = ds.length;
+  $(`${prefix}-need`).textContent = ds.length;
+  const lst = $(`${prefix}-list`);
   lst.textContent = '';
   ds.forEach(d => {
     const div = document.createElement('div');
     div.textContent = `${d.name}  (${d.account} / ${d.ipv4_public || '无 IP'})`;
     lst.append(div);
   });
-  $(`#${prefix}-input`).value = '';
-  $(`#${prefix}-confirm`).disabled = true;
-  $(`#modal-${prefix}`).hidden = false;
-  $(`#${prefix}-input`).focus();
+  $(`${prefix}-input`).value = '';
+  $(`${prefix}-confirm`).disabled = true;
+  $(`modal-${prefix}`).hidden = false;
+  $(`${prefix}-input`).focus();
 }
 function watchMaint(prefix, extraCheck) {
-  $(`#${prefix}-input`).oninput = e => {
-    $(`#${prefix}-confirm`).disabled =
+  $(`${prefix}-input`).oninput = e => {
+    $(`${prefix}-confirm`).disabled =
       e.target.value.trim() !== String(selDroplets().length) || !(extraCheck ? extraCheck() : true);
   };
 }
@@ -865,7 +865,10 @@ $('btn-nms').onclick = async () => {
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 
-load();
+</script>
+<!-- 独立脚本块：主脚本若有求值期异常，清单加载仍能独立运行 -->
+<script>
+try { load(); } catch (e) { banner('初始化失败: ' + e, true); }
 setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden && $('modal-ops').hidden) load(); }, 30000);
 </script>
 </body>
