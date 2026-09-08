@@ -41,6 +41,7 @@ button.accent { background: var(--accent); border-color: var(--accent); color: #
 table { border-collapse: collapse; width: calc(100% - 40px); margin: 0 20px 30px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--dim); font-weight: normal; font-size: 12px; }
+tbody tr { cursor: pointer; }
 tbody tr:hover { background: #1c2233; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
 .status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
@@ -194,6 +195,17 @@ tbody tr:hover { background: #1c2233; }
   </div>
 </div>
 
+<div class="overlay" id="modal-detail" hidden>
+  <div class="modal" style="width:min(680px,94vw)">
+    <h2>节点详情 <span id="dt-name" class="mono" style="font-size:14px;color:var(--accent)"></span></h2>
+    <div class="form-grid" id="dt-grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px 18px"></div>
+    <p id="dt-note" style="color:var(--dim);font-size:12px;margin:8px 0 0"></p>
+    <div class="modal-actions">
+      <button id="dt-close">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -207,12 +219,18 @@ const key = d => d.account + '/' + d.id;
 
 async function load() {
   try {
-    const [dr, cat] = await Promise.all([
+    const [dr, cat, ac] = await Promise.all([
       fetch('/api/droplets').then(r => r.json()),
       fetch('/api/catalog').then(r => r.json()).catch(() => null),
+      fetch('/api/accounts').then(r => r.json()).catch(() => null),
     ]);
     droplets = dr.droplets || [];
     acctErrors = dr.errors || [];
+    if (ac && Array.isArray(ac.accounts)) {
+      accountInfo = {};
+      ac.accounts.forEach(a => (accountInfo[a.name] = a));
+      if (ac.accounts.length) allAccounts = ac.accounts.map(a => a.name);
+    }
     if (cat && Array.isArray(cat.accounts) && cat.accounts.length) allAccounts = cat.accounts;
     render();
   } catch (e) { banner('加载失败: ' + e, true); }
@@ -282,10 +300,13 @@ function render() {
   }
   for (const d of list) {
     const tr = document.createElement('tr');
+    tr.onclick = () => openDetails(d);
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.checked = selected.has(key(d));
     cb.onchange = () => { cb.checked ? selected.add(key(d)) : selected.delete(key(d)); updateBar(list); };
-    const tdCb = document.createElement('td'); tdCb.append(cb); tr.append(tdCb);
+    const tdCb = document.createElement('td');
+    tdCb.onclick = e => e.stopPropagation();
+    tdCb.append(cb); tr.append(tdCb);
     tr.append(cell(d.name, 'mono'));
     tr.append(statusCell(d.status));
     tr.append(cell(d.region));
@@ -517,12 +538,63 @@ $('cr-submit').onclick = async () => {
   }
 };
 
+/* ---- 节点详情 ---- */
+let accountInfo = {}; // account -> {ssh_user, has_password, provider}
+
+function dtItem(grid, k, v, mono = true) {
+  const label = document.createElement('label');
+  label.textContent = k;
+  const val = document.createElement('div');
+  val.textContent = (v === undefined || v === null || v === '') ? '—' : v;
+  if (mono) val.className = 'mono';
+  val.style.color = 'var(--fg)';
+  val.style.fontSize = '13px';
+  label.append(val);
+  grid.append(label);
+}
+
+function openDetails(d) {
+  $('dt-name').textContent = d.name;
+  const g = $('dt-grid');
+  g.textContent = '';
+  const ai = accountInfo[d.account] || {};
+  dtItem(g, '名称', d.name);
+  dtItem(g, '提供商 ID（droplet id）', d.id);
+  dtItem(g, '状态', d.status, false);
+  dtItem(g, '账号', d.account, false);
+  dtItem(g, '提供商', d.provider, false);
+  dtItem(g, '区域', d.region);
+  dtItem(g, '套餐', d.size);
+  dtItem(g, '镜像', d.image);
+  dtItem(g, 'vCPU / 内存 / 磁盘',
+    d.vcpus ? `${d.vcpus} vCPU · ${(d.memory_mb / 1024).toFixed(1)} GB · ${d.disk_gb} GB` : '');
+  dtItem(g, '公网 IPv4', d.ipv4_public);
+  dtItem(g, '私网 IPv4', d.ipv4_private);
+  dtItem(g, '月费', d.price_monthly ? '$' + d.price_monthly.toFixed(2) : '');
+  dtItem(g, '创建时间', d.created_at ? new Date(d.created_at).toLocaleString() : '', false);
+  dtItem(g, '标签', (d.tags || []).join(' '), false);
+  dtItem(g, 'SSH 用户（导出 NMS 用）', ai.ssh_user || 'root', false);
+  const pw = $('dt-note');
+  if (ai.has_password) {
+    dtItem(g, 'SSH 密码', '已配置（导出载荷时携带）', false);
+    pw.textContent = '';
+  } else {
+    dtItem(g, 'SSH 密码', '未配置', false);
+    pw.textContent = '该账号未配置 SSH 密码：导出 NMS 载荷时此节点会被 NMS 拒绝（密码必填），'
+      + '可在「账号…」里补配后重新导出。';
+  }
+  $('modal-detail').hidden = false;
+}
+$('dt-close').onclick = () => ($('modal-detail').hidden = true);
+
 /* ---- 账号管理与 NMS 载荷导出 ---- */
 async function loadAccounts() {
   try {
     const r = await fetch('/api/accounts');
     const j = await r.json();
     if (!r.ok) { $('ac-msg').textContent = '失败: ' + (j.error || r.status); return; }
+    accountInfo = {};
+    (j.accounts || []).forEach(a => (accountInfo[a.name] = a));
     const lst = $('acct-list');
     lst.textContent = '';
     if (!(j.accounts || []).length) lst.textContent = '还没有账号';
