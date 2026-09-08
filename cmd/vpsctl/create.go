@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
 )
 
@@ -66,6 +67,9 @@ func runCreate(args []string) error {
 		}
 		opts.UserData = string(b)
 	}
+	if err := injectPasswords(cfg, clients, *userData, &opts); err != nil {
+		return err
+	}
 
 	if *dryRun {
 		plan, err := fleet.Plan(opts)
@@ -90,6 +94,34 @@ func runCreate(args []string) error {
 	}
 	if len(res.Errors) > 0 {
 		return fmt.Errorf("%d 台创建失败（部分节点可能已创建，详见上方 JSON）", len(res.Errors))
+	}
+	return nil
+}
+
+// injectPasswords 把选中账号配置的 ssh_password 生成为账号专属 cloud-init
+// （设密码 + 开 SSH 密码登录）。与 --user-data 互斥：零依赖没有 YAML 合并
+// 能力，两者同给宁可报错，避免密码悄悄不生效。
+func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, opts *fleet.Options) error {
+	byName := make(map[string]config.Account, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		byName[a.Name] = a
+	}
+	for _, c := range clients {
+		a := byName[c.Name]
+		if a.SSHPassword == "" {
+			continue
+		}
+		if userDataPath != "" {
+			return fmt.Errorf("账号 %s 配置了 ssh_password，与 --user-data 互斥：请把密码并入该 cloud-config 后去掉其一", c.Name)
+		}
+		ud, err := fleet.CloudInitPassword(a.SSHUser, a.SSHPassword)
+		if err != nil {
+			return fmt.Errorf("账号 %s: %w", c.Name, err)
+		}
+		if opts.UserDataByAccount == nil {
+			opts.UserDataByAccount = map[string]string{}
+		}
+		opts.UserDataByAccount[c.Name] = ud
 	}
 	return nil
 }
