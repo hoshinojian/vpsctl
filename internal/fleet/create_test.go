@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,8 @@ type fakeProvider struct {
 	actionStatus []string // ActionStatus 依次返回；耗尽后停驻最后一个
 	statusIdx    int
 	deletes      []string
+	rebuilds     []string // "id@image"
+	resizes      []string // "id@size disk=bool"
 }
 
 func (f *fakeProvider) Create(_ context.Context, req provider.CreateRequest) (provider.Server, error) {
@@ -72,6 +75,20 @@ func (f *fakeProvider) ActionStatus(_ context.Context, _ provider.ActionRef) (st
 		f.statusIdx++
 	}
 	return s, nil
+}
+
+func (f *fakeProvider) Rebuild(_ context.Context, id, image string) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rebuilds = append(f.rebuilds, id+"@"+image)
+	return provider.ActionRef{ID: "reb-" + id}, nil
+}
+
+func (f *fakeProvider) Resize(_ context.Context, id, size string, disk bool) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizes = append(f.resizes, fmt.Sprintf("%s@%s disk=%v", id, size, disk))
+	return provider.ActionRef{ID: "rsz-" + id}, nil
 }
 func (f *fakeProvider) SSHKeys(context.Context) ([]provider.SSHKey, error) {
 	return nil, errors.New("unexpected")

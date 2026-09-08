@@ -71,6 +71,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/create", s.handleCreate)
 	mux.HandleFunc("POST /api/power", s.handlePower)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
+	mux.HandleFunc("POST /api/rebuild", s.handleRebuild)
+	mux.HandleFunc("POST /api/resize", s.handleResize)
 	mux.HandleFunc("GET /api/accounts", s.handleAccounts)
 	mux.HandleFunc("POST /api/accounts", s.handleAddAccount)
 	mux.HandleFunc("GET /api/nms-payload", s.handleNMSPayload)
@@ -333,6 +335,69 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
 	}
 	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+// handleRebuild 重装选中节点（镜像必填，磁盘清空不可恢复）。
+func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Targets []target `json:"targets"`
+		Image   string   `json:"image"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Image == "" {
+		httpError(w, http.StatusBadRequest, "image 必填（重装会清空磁盘）")
+		return
+	}
+	if len(req.Targets) == 0 {
+		httpError(w, http.StatusBadRequest, "targets 为空")
+		return
+	}
+	clients, _, _ := s.snapshot()
+	targets := toFleetTargets(req.Targets)
+	res := fleet.RebuildBatch(r.Context(), clients, targets, req.Image, s.deleteWait, s.pollEvery)
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
+	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+// handleResize 改配选中节点（关机→改配→开机链由 fleet 编排）。
+func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Targets    []target `json:"targets"`
+		Size       string   `json:"size"`
+		ResizeDisk bool     `json:"resize_disk"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Size == "" {
+		httpError(w, http.StatusBadRequest, "size 必填")
+		return
+	}
+	if len(req.Targets) == 0 {
+		httpError(w, http.StatusBadRequest, "targets 为空")
+		return
+	}
+	clients, _, _ := s.snapshot()
+	targets := toFleetTargets(req.Targets)
+	res := fleet.ResizeBatch(r.Context(), clients, targets, req.Size, req.ResizeDisk, s.deleteWait, s.pollEvery)
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
+	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+func toFleetTargets(ts []target) []fleet.Target {
+	out := make([]fleet.Target, len(ts))
+	for i, t := range ts {
+		out[i] = fleet.Target{Account: t.Account, ID: t.ID}
+	}
+	return out
 }
 
 // ---- 账号管理与 NMS 载荷导出 ----

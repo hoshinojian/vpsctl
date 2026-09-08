@@ -93,6 +93,11 @@ type Provider interface {
 	Power(ctx context.Context, id string, action string) (ActionRef, error)
 	// ActionStatus 返回 in-progress / completed / errored。
 	ActionStatus(ctx context.Context, ref ActionRef) (string, error)
+	// Rebuild 用指定镜像重装节点：保留 ID/IP，磁盘数据清空、不可恢复。
+	Rebuild(ctx context.Context, id, image string) (ActionRef, error)
+	// Resize 变更套餐规格；节点须处于关机状态（编排层负责开关机链）。
+	// resizeDisk=true 同时扩磁盘（磁盘不可缩，属不可逆）。
+	Resize(ctx context.Context, id, size string, resizeDisk bool) (ActionRef, error)
 	SSHKeys(ctx context.Context) ([]SSHKey, error)
 	Regions(ctx context.Context) ([]Region, error)
 	Sizes(ctx context.Context) ([]Size, error)

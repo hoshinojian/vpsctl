@@ -332,3 +332,30 @@ func TestRetryDelay(t *testing.T) {
 		})
 	}
 }
+
+func TestRebuildAndResize(t *testing.T) {
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /droplets/7/actions", func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		writeJSON(w, http.StatusCreated, actionPage{Action: action{ID: 43, Status: "in-progress"}})
+	})
+	c := newTestClient(t, mux)
+
+	ref, err := c.Rebuild(context.Background(), "7", "ubuntu-24-04-x64")
+	if err != nil || ref.ID != "43" {
+		t.Fatalf("Rebuild: ref=%+v err=%v", ref, err)
+	}
+	if got["type"] != "rebuild" || got["image"] != "ubuntu-24-04-x64" {
+		t.Errorf("rebuild body = %v", got)
+	}
+
+	ref, err = c.Resize(context.Background(), "7", "s-2vcpu-2gb", true)
+	if err != nil || ref.ID != "43" {
+		t.Fatalf("Resize: ref=%+v err=%v", ref, err)
+	}
+	if got["type"] != "resize" || got["size"] != "s-2vcpu-2gb" || got["disk"] != true {
+		t.Errorf("resize body = %v", got)
+	}
+}
