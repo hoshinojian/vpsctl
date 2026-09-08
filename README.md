@@ -106,6 +106,9 @@ curl -s -X POST http://<nms-host>:<port>/api/v1/topology -d @nms-nodes.json
 - `device_type`/`ssh_port`/`ssh_user` 按缺省显式填好（vps / 22 / 账号级 `ssh_user` 或 root）
 - `ssh_password` 取账号级配置，未配置的账号会告警（NMS 录入密码必填，会被拒绝）
 - 无公网 IPv4 的节点跳过并提示（NMS 要求合法 `management_ip`）
+- **SSH 连通性预检**：导出前对每台探测 22 端口（2s 超时），不通的跳过并提示
+  （防止把连不上的机器灌进 NMS 变死台账）；`--no-check-ssh` 可关闭。
+  管理台「导出 NMS 载荷」按钮行为一致，跳过数经响应头提示
 - 另附 `provider`/`ram_mb`/`disk_gb`/`cpu_cores`/`cost_monthly`/`provisioned_at`
   冗余字段（NMS 现载荷忽略，扩契约后直接可用）
 - **载荷含明文密码**：`--output` 文件按 600 权限写入，勿提交进任何仓库

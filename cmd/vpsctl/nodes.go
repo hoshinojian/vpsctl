@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
@@ -39,6 +40,7 @@ func runNodeList(args []string) error {
 	accounts := fs.String("accounts", "", "账号配置路径（默认 ~/.config/vpsctl/accounts.json，或 $VPSCTL_ACCOUNTS）")
 	only := fs.String("only", "", "逗号分隔的账号名：只列出指定账号（默认全部账号）")
 	format := fs.String("format", "json", "输出格式：json（vpsctl 清单）| nms（NMS 导入载荷）")
+	noCheckSSH := fs.Bool("no-check-ssh", false, "跳过导出前的 SSH 端口连通性预检")
 	tag := fs.String("tag", "", "只保留含该 tag 的节点（如 batch:20260908T120000Z）")
 	status := fs.String("status", "", "只保留该状态的节点（active/new/off…）")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
@@ -65,9 +67,11 @@ func runNodeList(args []string) error {
 	entries, errs := listAll(context.Background(), clients)
 	entries = filterNodes(entries, *tag, *status)
 
+	ctx, stop := signalContext()
+	defer stop()
 	switch *format {
 	case "nms":
-		return printNMS(cfg, clients, entries, *output)
+		return printNMS(ctx, cfg, clients, entries, *output, !*noCheckSSH)
 	default:
 		res := listResult{Droplets: entries}
 		for _, e := range errs {
@@ -144,7 +148,7 @@ func hasTag(tags []string, want string) bool {
 
 // printNMS 渲染并输出 NMS 导入载荷：无公网 IPv4 的节点跳过（NMS 校验
 // management_ip 必填），凭据缺密码时告警（导入会被 04 §2.2 必填校验拒绝）。
-func printNMS(cfg *config.File, clients []fleet.AccountClient, entries []nodeEntry, output string) error {
+func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClient, entries []nodeEntry, output string, checkSSH bool) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
@@ -172,6 +176,23 @@ func printNMS(cfg *config.File, clients []fleet.AccountClient, entries []nodeEnt
 	}
 	for _, name := range skipped {
 		fmt.Fprintf(os.Stderr, "警告: %s 无公网 IPv4，未包含在 NMS 载荷（management_ip 必填）\n", name)
+	}
+	// SSH 连通性预检：22 端口不通的节点同样跳过（防止灌进 NMS 变死台账）
+	if checkSSH && len(keep) > 0 {
+		hosts := make([]string, 0, len(keep))
+		for _, sv := range keep {
+			hosts = append(hosts, sv.IPv4Public)
+		}
+		probe := fleet.ProbeSSHAll(ctx, hosts, 22, 2*time.Second)
+		filtered := keep[:0]
+		for _, sv := range keep {
+			if err := probe[sv.IPv4Public]; err != nil {
+				fmt.Fprintf(os.Stderr, "警告: %s（%s）SSH 端口不可达，未包含在 NMS 载荷: %v\n", sv.Name, sv.IPv4Public, err)
+				continue
+			}
+			filtered = append(filtered, sv)
+		}
+		keep = filtered
 	}
 	for acct := range noPass {
 		fmt.Fprintf(os.Stderr, "警告: 账号 %s 未配置 ssh_password，导入 NMS 会被拒绝（04 §2.2 必填）；请在 accounts.json 该账号补上后重新导出\n", acct)

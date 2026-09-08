@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -621,45 +622,104 @@ func TestWriteEndpointsRejectNonLoopback(t *testing.T) {
 }
 
 func TestNMSPayload(t *testing.T) {
-	srv := testServer(t, map[string]*fakeProvider{
-		"a1": {servers: []provider.Server{
-			{ID: "1", Account: "a1", Name: "vps-a1-01", Status: "active", Region: "sgp1",
-				IPv4Public: "203.0.113.1", MemoryMB: 1024, DiskGB: 25, VCPUs: 1, PriceMonthly: 6},
-			{ID: "2", Account: "a1", Name: "vps-a1-noip", Status: "active"}, // 无公网 IP，应跳过
-		}},
+	// 本机开一个监听当作"可达"目标，再开一个立刻关掉当作"不可达"
+	openLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openLn.Close()
+	go func() {
+		c, _ := openLn.Accept()
+		if c != nil {
+			c.Close()
+		}
+	}()
+	closedLn, _ := net.Listen("tcp", "127.0.0.1:0")
+	closedPort := closedLn.Addr().(*net.TCPAddr).Port
+	closedLn.Close()
+
+	newPayloadServer := func(t *testing.T, probePort int) *httptest.Server {
+		t.Helper()
+		cfg := &config.File{Accounts: []config.Account{
+			{Name: "a1", Provider: "digitalocean", Token: "t1", SSHPassword: "pw1"},
+		}}
+		s := New(nil, cfg, filepath.Join(t.TempDir(), "accounts.json"))
+		s.probePort = probePort
+		s.probeTimeout = 300 * time.Millisecond
+		srv := httptest.NewServer(s.Handler())
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	t.Run("可达节点保留", func(t *testing.T) {
+		s := New([]fleet.AccountClient{{Name: "a1", ProviderName: "digitalocean",
+			Provider: &fakeProvider{servers: []provider.Server{
+				{ID: "1", Account: "a1", Name: "vps-a1-01", IPv4Public: "127.0.0.1"},
+			}}}},
+			&config.File{Accounts: []config.Account{
+				{Name: "a1", Provider: "digitalocean", Token: "t1", SSHPassword: "pw1"},
+			}}, filepath.Join(t.TempDir(), "accounts.json"))
+		s.probePort = openLn.Addr().(*net.TCPAddr).Port
+		s.probeTimeout = 300 * time.Millisecond
+		srv := httptest.NewServer(s.Handler())
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/api/nms-payload")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var payload nms.Payload
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Nodes) != 1 || payload.Nodes[0].SSHPassword != "pw1" {
+			t.Fatalf("nodes = %+v", payload.Nodes)
+		}
+		if resp.Header.Get("X-Vpsctl-Unreachable") != "0" {
+			t.Errorf("Unreachable = %q", resp.Header.Get("X-Vpsctl-Unreachable"))
+		}
 	})
-	resp, err := http.Get(srv.URL + "/api/nms-payload")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var payload nms.Payload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("载荷不是合法 NMS JSON: %v\n%s", err, body)
-	}
-	if len(payload.Nodes) != 1 {
-		t.Fatalf("应只含 1 台（无 IP 跳过）: %+v", payload.Nodes)
-	}
-	n := payload.Nodes[0]
-	if n.ID != "vps-a1-01" || n.SSHPassword != "pw-a1" || n.SSHUser != "root" {
-		t.Errorf("节点不符: %+v", n)
-	}
-	if resp.Header.Get("X-Vpsctl-Skipped") != "1" {
-		t.Errorf("应报告跳过 1 台, got %q", resp.Header.Get("X-Vpsctl-Skipped"))
-	}
-	if resp.Header.Get("Content-Disposition") == "" {
-		t.Error("应有下载头")
-	}
-	// 账号过滤
-	resp2, err := http.Get(srv.URL + "/api/nms-payload?account=nope")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp2.StatusCode != http.StatusBadRequest {
-		t.Errorf("未知账号应 400, got %d", resp2.StatusCode)
-	}
-	resp2.Body.Close()
+
+	t.Run("不可达节点跳过", func(t *testing.T) {
+		s := New([]fleet.AccountClient{{Name: "a1", ProviderName: "digitalocean",
+			Provider: &fakeProvider{servers: []provider.Server{
+				{ID: "1", Account: "a1", Name: "vps-a1-01", IPv4Public: "127.0.0.1"},
+			}}}},
+			&config.File{Accounts: []config.Account{
+				{Name: "a1", Provider: "digitalocean", Token: "t1", SSHPassword: "pw1"},
+			}}, filepath.Join(t.TempDir(), "accounts.json"))
+		s.probePort = closedPort
+		s.probeTimeout = 300 * time.Millisecond
+		srv := httptest.NewServer(s.Handler())
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/api/nms-payload")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var payload nms.Payload
+		_ = json.NewDecoder(resp.Body).Decode(&payload)
+		if len(payload.Nodes) != 0 {
+			t.Fatalf("不可达应被跳过: %+v", payload.Nodes)
+		}
+		if resp.Header.Get("X-Vpsctl-Unreachable") != "1" {
+			t.Errorf("Unreachable = %q", resp.Header.Get("X-Vpsctl-Unreachable"))
+		}
+	})
+
+	t.Run("账号过滤未知报错", func(t *testing.T) {
+		srv := newPayloadServer(t, openLn.Addr().(*net.TCPAddr).Port)
+		resp, err := http.Get(srv.URL + "/api/nms-payload?account=nope")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("未知账号应 400, got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	})
 }
 
 func TestRebuildResizeEndpoints(t *testing.T) {

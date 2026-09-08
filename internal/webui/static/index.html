@@ -801,6 +801,7 @@ $('btn-nms').onclick = async () => {
       return;
     }
     const skipped = parseInt(r.headers.get('X-Vpsctl-Skipped') || '0', 10);
+    const unreachable = parseInt(r.headers.get('X-Vpsctl-Unreachable') || '0', 10);
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -811,7 +812,8 @@ $('btn-nms').onclick = async () => {
     a.remove();
     URL.revokeObjectURL(url);
     toast('已下载 NMS 载荷（含明文密码，注意保管）'
-      + (skipped ? `；已跳过 ${skipped} 台无公网 IP 的节点` : ''));
+      + (skipped ? `；跳过 ${skipped} 台无公网 IP` : '')
+      + (unreachable ? `；跳过 ${unreachable} 台 SSH 端口不可达` : ''));
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 

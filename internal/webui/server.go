@@ -34,8 +34,10 @@ type Server struct {
 	// newProvider 可注入（测试）；生产为 provider.New
 	newProvider func(providerName, account, token string) (provider.Provider, error)
 
-	deleteWait time.Duration // shutdown_first 等待关机完成上限
-	pollEvery  time.Duration
+	deleteWait   time.Duration // shutdown_first 等待关机完成上限
+	pollEvery    time.Duration
+	probePort    int           // NMS 导出预检探测端口（默认 22；测试注入）
+	probeTimeout time.Duration // 单台探测超时
 }
 
 func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Server {
@@ -51,8 +53,10 @@ func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Serve
 		newProvider: func(name, account, token string) (provider.Provider, error) {
 			return provider.New(name, account, token, nil)
 		},
-		deleteWait: 120 * time.Second,
-		pollEvery:  2 * time.Second,
+		deleteWait:   120 * time.Second,
+		pollEvery:    2 * time.Second,
+		probePort:    22,
+		probeTimeout: 2 * time.Second,
 	}
 }
 
@@ -655,10 +659,27 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 		}
 		keep = append(keep, sv)
 	}
+	// SSH 连通性预检：22 端口不通的同样跳过（与 CLI --format nms 同语义）
+	hosts := make([]string, 0, len(keep))
+	for _, sv := range keep {
+		hosts = append(hosts, sv.IPv4Public)
+	}
+	probe := fleet.ProbeSSHAll(r.Context(), hosts, s.probePort, s.probeTimeout)
+	unreachable := 0
+	filtered := keep[:0]
+	for _, sv := range keep {
+		if probe[sv.IPv4Public] != nil {
+			unreachable++
+			continue
+		}
+		filtered = append(filtered, sv)
+	}
+	keep = filtered
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nms-nodes.json"`)
 	w.Header().Set("X-Vpsctl-Skipped", strconv.Itoa(skipped))
+	w.Header().Set("X-Vpsctl-Unreachable", strconv.Itoa(unreachable))
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts)})
 }
