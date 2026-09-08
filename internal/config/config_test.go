@@ -88,6 +88,32 @@ func TestLoadSSHCredentials(t *testing.T) {
 	}
 }
 
+func TestSaveRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	in := &File{Accounts: []Account{
+		{Name: "do-1", Provider: "digitalocean", Token: "t1", SSHUser: "root", SSHPassword: "pw"},
+		{Name: "do-2", Provider: "digitalocean", Token: "t2"},
+	}}
+	if err := Save(path, in); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, warns, err := Load(path)
+	if err != nil || len(warns) != 0 {
+		t.Fatalf("Load: %v warns=%v", err, warns)
+	}
+	if len(out.Accounts) != 2 || out.Accounts[0].SSHPassword != "pw" || out.Accounts[1].SSHUser != "" {
+		t.Errorf("round-trip 不符: %+v", out.Accounts)
+	}
+	// 保存的文件必须 600（含 token/密码），加载不告警即已验证权限，这里再显式确认
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("保存权限 = %04o, want 0600", perm)
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Setenv("VPSCTL_ACCOUNTS", "")
 	home, _ := os.UserHomeDir()

@@ -82,6 +82,17 @@ func (f *File) Validate() error {
 	return nil
 }
 
+// Save 把配置写回 path（0600——文件含 token/密码）。整体覆盖：accounts.json
+// 契约就是 {accounts:[…]}，没有需要保留的注释或扩展字段。
+func Save(path string, f *File) error {
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("编码配置: %w", err)
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o600)
+}
+
 func permWarnings(path string) []string {
 	info, err := os.Stat(path)
 	if err != nil {
