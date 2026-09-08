@@ -20,13 +20,17 @@ make build   # 产物 bin/vpsctl
 ```json
 {
   "accounts": [
-    { "name": "do-1", "provider": "digitalocean", "token": "dop_v1_xxx" },
+    { "name": "do-1", "provider": "digitalocean", "token": "dop_v1_xxx",
+      "ssh_user": "root", "ssh_password": "CHANGE_ME" },
     { "name": "do-2", "provider": "digitalocean", "token": "dop_v1_yyy" }
   ]
 }
 ```
 
 - `name`：账号别名，出现在节点命名与结果 JSON 里，需唯一
+- `ssh_user`/`ssh_password`（可选）：账号级 SSH 凭据。配置了密码的账号，
+  `create` 时自动注入最小 cloud-config 设密码并开启 SSH 密码登录（与
+  `--user-data` 互斥，同给报错）；`list --format nms` 导出 NMS 载荷时带上
 - 加载时若文件权限过宽会告警（token 文件建议 `chmod 600`）
 
 ## 批量创建：`vpsctl create`
@@ -67,6 +71,32 @@ vpsctl create \
   "errors": [ { "account": "do-2", "name": "vps-do-2-02", "index": 2, "error": "…" } ]
 }
 ```
+
+## 节点清单：`vpsctl list`
+
+跨账号拉取全部节点，默认输出 JSON（`--only` 选账号、`--tag`/`--status` 过滤）：
+
+```sh
+vpsctl list                          # 全部账号节点清单 JSON
+vpsctl list --tag batch:20260908T120000Z --status active
+```
+
+### 导出 NMS 台账导入载荷：`--format nms`
+
+输出对齐 nms 仓 API 契约 04 §1.1 的节点对象（`id` 取节点名——重建后同名重导
+正好走 NMS 的重录复活通道），可直接喂给 NMS 整网导入（upsert 幂等）：
+
+```sh
+vpsctl list --format nms --output nms-nodes.json
+curl -s -X POST http://<nms-host>:<port>/api/v1/topology -d @nms-nodes.json
+```
+
+- `device_type`/`ssh_port`/`ssh_user` 按缺省显式填好（vps / 22 / 账号级 `ssh_user` 或 root）
+- `ssh_password` 取账号级配置，未配置的账号会告警（NMS 录入密码必填，会被拒绝）
+- 无公网 IPv4 的节点跳过并提示（NMS 要求合法 `management_ip`）
+- 另附 `provider`/`ram_mb`/`disk_gb`/`cpu_cores`/`cost_monthly`/`provisioned_at`
+  冗余字段（NMS 现载荷忽略，扩契约后直接可用）
+- **载荷含明文密码**：`--output` 文件按 600 权限写入，勿提交进任何仓库
 
 ## 管理台：`vpsctl serve`
 
