@@ -7,13 +7,17 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/nms"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -22,23 +26,42 @@ var indexHTML []byte
 
 // Server 是管理台 HTTP 服务。
 type Server struct {
-	clients    []fleet.AccountClient
-	byAccount  map[string]provider.Provider
+	mu        sync.RWMutex // 保护下面三样（新增账号会热更新 clients/byAccount/cfg）
+	clients   []fleet.AccountClient
+	byAccount map[string]provider.Provider
+	cfg       *config.File // 账号配置（NMS 导出凭据来源 + 新增账号落盘）
+	cfgPath   string
+
+	// newProvider 可注入（测试）；生产为 provider.New
+	newProvider func(providerName, account, token string) (provider.Provider, error)
+
 	deleteWait time.Duration // shutdown_first 等待关机完成上限
 	pollEvery  time.Duration
 }
 
-func New(clients []fleet.AccountClient) *Server {
+func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Server {
 	byAccount := make(map[string]provider.Provider, len(clients))
 	for _, ac := range clients {
 		byAccount[ac.Name] = ac.Provider
 	}
 	return &Server{
-		clients:    clients,
-		byAccount:  byAccount,
+		clients:   clients,
+		byAccount: byAccount,
+		cfg:       cfg,
+		cfgPath:   cfgPath,
+		newProvider: func(name, account, token string) (provider.Provider, error) {
+			return provider.New(name, account, token, nil)
+		},
 		deleteWait: 120 * time.Second,
 		pollEvery:  2 * time.Second,
 	}
+}
+
+// snapshot 取当前账号客户端/提供商映射/配置的一致性视图。
+func (s *Server) snapshot() ([]fleet.AccountClient, map[string]provider.Provider, *config.File) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.clients, s.byAccount, s.cfg
 }
 
 // Handler 返回路由，便于 httptest。
@@ -49,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/create", s.handleCreate)
 	mux.HandleFunc("POST /api/power", s.handlePower)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
+	mux.HandleFunc("GET /api/accounts", s.handleAccounts)
+	mux.HandleFunc("POST /api/accounts", s.handleAddAccount)
+	mux.HandleFunc("GET /api/nms-payload", s.handleNMSPayload)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -141,7 +167,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Prefix == "" {
 		req.Prefix = "vps"
 	}
-	clients, err := fleet.SelectClients(s.clients, []string{req.Account})
+	clients, _, _ := s.snapshot()
+	clients, err := fleet.SelectClients(clients, []string{req.Account})
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
@@ -175,8 +202,9 @@ type catalogResponse struct {
 // 带账号时并行拉取该账号的 regions/sizes/images/keys（均为只读 API）。
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	account := r.URL.Query().Get("account")
-	names := make([]string, 0, len(s.clients))
-	for _, ac := range s.clients {
+	clients, byAccount, _ := s.snapshot()
+	names := make([]string, 0, len(clients))
+	for _, ac := range clients {
 		names = append(names, ac.Name)
 	}
 	sort.Strings(names)
@@ -185,7 +213,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	p, ok := s.byAccount[account]
+	p, ok := byAccount[account]
 	if !ok {
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("未知账号 %q（可用: %s）", account, strings.Join(names, ", ")))
 		return
@@ -219,10 +247,11 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDroplets(w http.ResponseWriter, r *http.Request) {
-	out := make([][]uiDroplet, len(s.clients))
-	errs := make([]accountError, len(s.clients))
+	clients, _, _ := s.snapshot()
+	out := make([][]uiDroplet, len(clients))
+	errs := make([]accountError, len(clients))
 	var wg sync.WaitGroup
-	for i, ac := range s.clients {
+	for i, ac := range clients {
 		wg.Add(1)
 		go func(i int, ac fleet.AccountClient) {
 			defer wg.Done()
@@ -264,12 +293,13 @@ func (s *Server) handlePower(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results := make([]opResult, len(req.Targets))
+	_, byAccount, _ := s.snapshot()
 	var wg sync.WaitGroup
 	for i, t := range req.Targets {
 		wg.Add(1)
 		go func(i int, t target) {
 			defer wg.Done()
-			p, ok := s.byAccount[t.Account]
+			p, ok := byAccount[t.Account]
 			if !ok {
 				results[i] = opResult{Account: t.Account, ID: t.ID, Error: "未知账号"}
 				return
@@ -300,12 +330,13 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results := make([]opResult, len(req.Targets))
+	_, byAccount, _ := s.snapshot()
 	var wg sync.WaitGroup
 	for i, t := range req.Targets {
 		wg.Add(1)
 		go func(i int, t target) {
 			defer wg.Done()
-			results[i] = s.deleteOne(r.Context(), t, req.ShutdownFirst)
+			results[i] = s.deleteOne(r.Context(), byAccount, t, req.ShutdownFirst)
 		}(i, t)
 	}
 	wg.Wait()
@@ -314,11 +345,11 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 // deleteOne 删除单台；shutdown_first 时先优雅关机并等待完成，
 // 未在时限内完成则不删（宁可漏删，不可误删）。
-func (s *Server) deleteOne(ctx context.Context, t target, shutdownFirst bool) opResult {
+func (s *Server) deleteOne(ctx context.Context, byAccount map[string]provider.Provider, t target, shutdownFirst bool) opResult {
 	fail := func(format string, args ...any) opResult {
 		return opResult{Account: t.Account, ID: t.ID, Error: fmt.Sprintf(format, args...)}
 	}
-	p, ok := s.byAccount[t.Account]
+	p, ok := byAccount[t.Account]
 	if !ok {
 		return fail("未知账号 %q", t.Account)
 	}
@@ -353,6 +384,167 @@ func (s *Server) deleteOne(ctx context.Context, t target, shutdownFirst bool) op
 		return fail("删除失败: %v", err)
 	}
 	return opResult{Account: t.Account, ID: t.ID, OK: true}
+}
+
+// ---- 账号管理与 NMS 载荷导出 ----
+
+// accountView 是账号的管理台视图：永不回传 token/密码明文。
+type accountView struct {
+	Name        string `json:"name"`
+	Provider    string `json:"provider"`
+	SSHUser     string `json:"ssh_user"`
+	HasPassword bool   `json:"has_password"`
+}
+
+type accountsResponse struct {
+	Accounts  []accountView `json:"accounts"`
+	Providers []string      `json:"providers"` // 已注册可用的提供商名
+}
+
+type addAccountRequest struct {
+	Name        string `json:"name"`
+	Provider    string `json:"provider"`
+	Token       string `json:"token"`
+	SSHUser     string `json:"ssh_user"`
+	SSHPassword string `json:"ssh_password"`
+}
+
+// loopbackOnly 拦截非回环请求：账号管理与 NMS 载荷涉及凭据读写，
+// 比只读列表更敏感，即使将来非回环监听也只在回环会话开放。
+func loopbackOnly(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	if !loopbackOnly(r) {
+		httpError(w, http.StatusForbidden, "账号管理仅限本机回环访问")
+		return
+	}
+	_, _, cfg := s.snapshot()
+	resp := accountsResponse{Providers: provider.Names()}
+	for _, a := range cfg.Accounts {
+		resp.Accounts = append(resp.Accounts, accountView{
+			Name: a.Name, Provider: a.Provider, SSHUser: a.SSHUser,
+			HasPassword: a.SSHPassword != "",
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAddAccount 新增账号：校验 → 落盘（0600）→ 热更新客户端，免重启生效。
+// 先落盘成功再改内存，落盘失败时内存保持原状。
+func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
+	if !loopbackOnly(r) {
+		httpError(w, http.StatusForbidden, "账号管理仅限本机回环访问")
+		return
+	}
+	var req addAccountRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Name == "" || req.Token == "" {
+		httpError(w, http.StatusBadRequest, "name/token 必填")
+		return
+	}
+	p, err := s.newProvider(req.Provider, req.Name, req.Token)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.cfg.Accounts {
+		if a.Name == req.Name {
+			httpError(w, http.StatusBadRequest, fmt.Sprintf("账号名 %q 已存在", req.Name))
+			return
+		}
+	}
+	s.cfg.Accounts = append(s.cfg.Accounts, config.Account{
+		Name: req.Name, Provider: req.Provider, Token: req.Token,
+		SSHUser: req.SSHUser, SSHPassword: req.SSHPassword,
+	})
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		s.cfg.Accounts = s.cfg.Accounts[:len(s.cfg.Accounts)-1] // 回滚内存
+		httpError(w, http.StatusInternalServerError, "保存账号文件失败: "+err.Error())
+		return
+	}
+	s.clients = append(s.clients, fleet.AccountClient{
+		Name: req.Name, ProviderName: req.Provider, Provider: p,
+	})
+	s.byAccount[req.Name] = p
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name})
+}
+
+// handleNMSPayload 生成 NMS 台账导入载荷（04 §1.1）。因含明文 SSH 密码，
+// 仅限回环；无公网 IPv4 的节点跳过（NMS 要求 management_ip），
+// 跳过数放 X-Vpsctl-Skipped 头供前端提示。
+func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
+	if !loopbackOnly(r) {
+		httpError(w, http.StatusForbidden, "NMS 载荷含凭据，仅限本机回环下载")
+		return
+	}
+	clients, _, cfg := s.snapshot()
+	if account := r.URL.Query().Get("account"); account != "" {
+		var err error
+		clients, err = fleet.SelectClients(clients, []string{account})
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// 并行拉取各账号节点（与 handleDroplets 同模式）
+	servers := make([]fleet.ServerJSON, 0, 16)
+	errs := make([]accountError, len(clients))
+	var wg sync.WaitGroup
+	for i, ac := range clients {
+		wg.Add(1)
+		go func(i int, ac fleet.AccountClient) {
+			defer wg.Done()
+			list, err := ac.Provider.List(r.Context())
+			if err != nil {
+				errs[i] = accountError{Account: ac.Name, Error: err.Error()}
+				return
+			}
+			for _, sv := range list {
+				servers = append(servers, toServerJSON(sv))
+			}
+		}(i, ac)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		if e.Account != "" {
+			httpError(w, http.StatusBadGateway, fmt.Sprintf("账号 %s 查询失败: %s", e.Account, e.Error))
+			return
+		}
+	}
+
+	accts := make(map[string]nms.Account, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		accts[a.Name] = nms.Account{Provider: a.Provider, SSHUser: a.SSHUser, SSHPassword: a.SSHPassword}
+	}
+	var (
+		keep    []fleet.ServerJSON
+		skipped int
+	)
+	for _, sv := range servers {
+		if sv.IPv4Public == "" {
+			skipped++
+			continue
+		}
+		keep = append(keep, sv)
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="nms-nodes.json"`)
+	w.Header().Set("X-Vpsctl-Skipped", strconv.Itoa(skipped))
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts)})
 }
 
 // ---- 工具 ----

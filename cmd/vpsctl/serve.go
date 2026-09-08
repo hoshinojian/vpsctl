@@ -21,7 +21,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	cfg, err := loadAccounts(*accounts)
+	cfg, cfgPath, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,7 @@ func runServe(args []string) error {
 	defer stop()
 	srv := &http.Server{
 		Addr:    *listen,
-		Handler: webui.New(clients).Handler(),
+		Handler: webui.New(clients, cfg, cfgPath).Handler(),
 	}
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()

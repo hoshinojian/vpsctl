@@ -33,7 +33,7 @@ func runCreate(args []string) error {
 		return err
 	}
 
-	cfg, err := loadAccounts(*accounts)
+	cfg, _, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}

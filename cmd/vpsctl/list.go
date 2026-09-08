@@ -20,7 +20,7 @@ func runList(kind string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadAccounts(*accounts)
+	cfg, _, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
