@@ -38,6 +38,20 @@ type Server struct {
 	pollEvery    time.Duration
 	probePort    int           // NMS 导出预检探测端口（默认 22；测试注入）
 	probeTimeout time.Duration // 单台探测超时
+
+	opLog []opEntry // 操作历史环形日志（最新在前，cap maxOpLog）
+}
+
+// maxOpLog 操作历史保留条数（内存态，serve 重启即清）。
+const maxOpLog = 100
+
+// opEntry 是一条操作历史（不含任何凭据）。
+type opEntry struct {
+	Time   time.Time `json:"time"`
+	Kind   string    `json:"kind"`   // power/delete/rebuild/resize/create/account/export
+	Detail string    `json:"detail"` // 人类可读摘要
+	OK     int       `json:"ok"`
+	Fail   int       `json:"fail"`
 }
 
 func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Server {
@@ -57,6 +71,22 @@ func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Serve
 		pollEvery:    2 * time.Second,
 		probePort:    22,
 		probeTimeout: 2 * time.Second,
+		opLog:        []opEntry{},
+	}
+}
+
+// logOp 记录一条操作历史（最新插队首，超出 maxOpLog 截断）。
+func (s *Server) logOp(kind, detail string, ok, fail int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logOpLocked(kind, detail, ok, fail)
+}
+
+// logOpLocked 同 logOp，供已持有 s.mu 写锁的路径调用（RWMutex 不可重入）。
+func (s *Server) logOpLocked(kind, detail string, ok, fail int) {
+	s.opLog = append([]opEntry{{Time: time.Now(), Kind: kind, Detail: detail, OK: ok, Fail: fail}}, s.opLog...)
+	if len(s.opLog) > maxOpLog {
+		s.opLog = s.opLog[:maxOpLog]
 	}
 }
 
@@ -82,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/accounts/{name}", s.handleEditAccount)
 	mux.HandleFunc("DELETE /api/accounts/{name}", s.handleRemoveAccount)
 	mux.HandleFunc("GET /api/nms-payload", s.handleNMSPayload)
+	mux.HandleFunc("GET /api/operations", s.handleOperations)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -193,6 +224,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.logOp("create", fmt.Sprintf("创建 %d 台（%s/%s）", len(res.Created), req.Region, req.Size),
+		len(res.Created), len(res.Errors))
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -305,6 +338,15 @@ func (s *Server) handlePower(w http.ResponseWriter, r *http.Request) {
 		targets[i] = fleet.Target{Account: t.Account, ID: t.ID}
 	}
 	res := fleet.PowerBatch(r.Context(), clients, targets, req.Action)
+	ok, fail := 0, 0
+	for _, x := range res {
+		if x.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	s.logOp("power", fmt.Sprintf("%s %d 台", req.Action, len(res)), ok, fail)
 	results := make([]opResult, len(res))
 	for i, x := range res {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
@@ -336,6 +378,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		Wait:          s.deleteWait,
 		Poll:          s.pollEvery,
 	})
+	ok, fail := 0, 0
+	for _, x := range res {
+		if x.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	s.logOp("delete", fmt.Sprintf("删除 %d 台（shutdown_first=%v）", len(res), req.ShutdownFirst), ok, fail)
 	results := make([]opResult, len(res))
 	for i, x := range res {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
@@ -363,6 +414,15 @@ func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	clients, _, _ := s.snapshot()
 	targets := toFleetTargets(req.Targets)
 	res := fleet.RebuildBatch(r.Context(), clients, targets, req.Image, s.deleteWait, s.pollEvery)
+	ok, fail := 0, 0
+	for _, x := range res {
+		if x.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	s.logOp("rebuild", fmt.Sprintf("重装 %d 台 → %s", len(res), req.Image), ok, fail)
 	results := make([]opResult, len(res))
 	for i, x := range res {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
@@ -391,6 +451,15 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 	clients, _, _ := s.snapshot()
 	targets := toFleetTargets(req.Targets)
 	res := fleet.ResizeBatch(r.Context(), clients, targets, req.Size, req.ResizeDisk, s.deleteWait, s.pollEvery)
+	ok, fail := 0, 0
+	for _, x := range res {
+		if x.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	s.logOp("resize", fmt.Sprintf("改配 %d 台 → %s", len(res), req.Size), ok, fail)
 	results := make([]opResult, len(res))
 	for i, x := range res {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
@@ -497,6 +566,7 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, ProviderName: req.Provider, Provider: p,
 	})
 	s.byAccount[req.Name] = p
+	s.logOpLocked("account", "新增账号 "+req.Name, 1, 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name})
 }
 
@@ -552,6 +622,7 @@ func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.logOpLocked("account", "编辑账号 "+name, 1, 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
 }
 
@@ -597,6 +668,7 @@ func (s *Server) handleRemoveAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	delete(s.byAccount, name)
+	s.logOpLocked("account", "删除账号 "+name, 1, 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
 }
 
@@ -679,9 +751,19 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nms-nodes.json"`)
 	w.Header().Set("X-Vpsctl-Skipped", strconv.Itoa(skipped))
+	s.logOp("export", fmt.Sprintf("导出 NMS 载荷 %d 台（无 IP 跳过 %d，SSH 不可达跳过 %d）", len(keep), skipped, unreachable), 1, 0)
 	w.Header().Set("X-Vpsctl-Unreachable", strconv.Itoa(unreachable))
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts)})
+}
+
+// handleOperations 返回最近的操作历史（内存态，serve 重启即清）。
+func (s *Server) handleOperations(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ops := make([]opEntry, len(s.opLog))
+	copy(ops, s.opLog)
+	writeJSON(w, http.StatusOK, map[string]any{"operations": ops})
 }
 
 // ---- 工具 ----

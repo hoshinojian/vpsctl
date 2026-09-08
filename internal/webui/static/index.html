@@ -98,6 +98,7 @@ tbody tr:hover { background: #1c2233; }
   <span id="selinfo">未选择</span>
   <button id="btn-create">创建节点…</button>
   <button id="btn-accounts">账号…</button>
+  <button id="btn-ops">操作记录</button>
   <button id="btn-nms" class="accent">导出 NMS 载荷</button>
   <button id="btn-poweroff" class="warn" disabled>关机</button>
   <button id="btn-poweron" disabled>开机</button>
@@ -228,6 +229,16 @@ tbody tr:hover { background: #1c2233; }
     <div class="modal-actions">
       <button id="rz-cancel">取消</button>
       <button id="rz-confirm" class="accent" disabled>改配</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-ops" hidden>
+  <div class="modal" style="width:min(680px,94vw)">
+    <h2>操作记录 <span style="color:var(--dim);font-size:12px;font-weight:normal">（最近 100 条，仅本 serve 进程内，重启即清）</span></h2>
+    <div id="ops-list" class="dellist" style="max-height:320px"></div>
+    <div class="modal-actions">
+      <button id="ops-close">关闭</button>
     </div>
   </div>
 </div>
@@ -575,6 +586,29 @@ $('cr-submit').onclick = async () => {
   }
 };
 
+/* ---- 操作记录 ---- */
+$('btn-ops').onclick = async () => {
+  $('modal-ops').hidden = false;
+  const lst = $('ops-list');
+  lst.textContent = '加载中…';
+  try {
+    const r = await fetch('/api/operations');
+    const j = await r.json();
+    lst.textContent = '';
+    const ops = j.operations || [];
+    if (!ops.length) { lst.textContent = '还没有操作记录'; return; }
+    ops.forEach(o => {
+      const div = document.createElement('div');
+      const t = new Date(o.time).toLocaleString();
+      div.textContent = `${t} · ${o.kind} · ${o.detail}`
+        + (o.fail ? ` · 成功 ${o.ok} 失败 ${o.fail}` : ` · 全部成功（${o.ok}）`);
+      div.style.color = o.fail ? 'var(--warn)' : 'var(--fg)';
+      lst.append(div);
+    });
+  } catch (e) { lst.textContent = '加载失败: ' + e; }
+};
+$('ops-close').onclick = () => ($('modal-ops').hidden = true);
+
 /* ---- 节点详情 ---- */
 let accountInfo = {}; // account -> {ssh_user, has_password, provider}
 
@@ -818,7 +852,7 @@ $('btn-nms').onclick = async () => {
 };
 
 load();
-setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden) load(); }, 30000);
+setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden && $('modal-ops').hidden) load(); }, 30000);
 </script>
 </body>
 </html>
