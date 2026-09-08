@@ -34,8 +34,10 @@ type Server struct {
 	// newProvider 可注入（测试）；生产为 provider.New
 	newProvider func(providerName, account, token string) (provider.Provider, error)
 
-	deleteWait time.Duration // shutdown_first 等待关机完成上限
-	pollEvery  time.Duration
+	deleteWait   time.Duration // shutdown_first 等待关机完成上限
+	pollEvery    time.Duration
+	probePort    int           // NMS 导出预检探测端口（默认 22；测试注入）
+	probeTimeout time.Duration // 单台探测超时
 }
 
 func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Server {
@@ -51,8 +53,10 @@ func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Serve
 		newProvider: func(name, account, token string) (provider.Provider, error) {
 			return provider.New(name, account, token, nil)
 		},
-		deleteWait: 120 * time.Second,
-		pollEvery:  2 * time.Second,
+		deleteWait:   120 * time.Second,
+		pollEvery:    2 * time.Second,
+		probePort:    22,
+		probeTimeout: 2 * time.Second,
 	}
 }
 
@@ -75,6 +79,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/resize", s.handleResize)
 	mux.HandleFunc("GET /api/accounts", s.handleAccounts)
 	mux.HandleFunc("POST /api/accounts", s.handleAddAccount)
+	mux.HandleFunc("PUT /api/accounts/{name}", s.handleEditAccount)
+	mux.HandleFunc("DELETE /api/accounts/{name}", s.handleRemoveAccount)
 	mux.HandleFunc("GET /api/nms-payload", s.handleNMSPayload)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -494,6 +500,106 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name})
 }
 
+// handleEditAccount 编辑账号：只更新请求中出现的字段；token 留空 = 不变；
+// clear_password=true 显式清除密码。成功后重建该账号客户端并落盘。
+func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
+	if !loopbackOnly(r) {
+		httpError(w, http.StatusForbidden, "账号管理仅限本机回环访问")
+		return
+	}
+	name := r.PathValue("name")
+	var req struct {
+		Token         *string `json:"token"`
+		SSHUser       *string `json:"ssh_user"`
+		SSHPassword   *string `json:"ssh_password"`
+		ClearPassword bool    `json:"clear_password"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.cfg.Find(name)
+	if a == nil {
+		httpError(w, http.StatusNotFound, fmt.Sprintf("账号 %q 不存在", name))
+		return
+	}
+	old := *a
+	if req.Token != nil && *req.Token != "" {
+		a.Token = *req.Token
+	}
+	if req.SSHUser != nil {
+		a.SSHUser = *req.SSHUser
+	}
+	if req.ClearPassword {
+		a.SSHPassword = ""
+	} else if req.SSHPassword != nil && *req.SSHPassword != "" {
+		a.SSHPassword = *req.SSHPassword
+	}
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		*a = old // 回滚内存
+		httpError(w, http.StatusInternalServerError, "保存账号文件失败: "+err.Error())
+		return
+	}
+	// token 变更才需要重建客户端；凭据字段不影响客户端
+	if a.Token != old.Token {
+		if p, err := s.newProvider(a.Provider, a.Name, a.Token); err == nil {
+			s.byAccount[a.Name] = p
+			for i := range s.clients {
+				if s.clients[i].Name == a.Name {
+					s.clients[i].Provider = p
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+}
+
+// handleRemoveAccount 删除账号：账号下仍有机器时 409（可用 force=1 强制）；
+// 删除最后一个账号 400。落盘成功后移除内存客户端。
+func (s *Server) handleRemoveAccount(w http.ResponseWriter, r *http.Request) {
+	if !loopbackOnly(r) {
+		httpError(w, http.StatusForbidden, "账号管理仅限本机回环访问")
+		return
+	}
+	name := r.PathValue("name")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.cfg.Find(name)
+	if a == nil {
+		httpError(w, http.StatusNotFound, fmt.Sprintf("账号 %q 不存在", name))
+		return
+	}
+	// 防呆：账号下仍有机器时拒绝（删除的只是本地配置，机器仍在提供商处）
+	if r.URL.Query().Get("force") != "1" {
+		if p, ok := s.byAccount[name]; ok {
+			if servers, err := p.List(r.Context()); err == nil && len(servers) > 0 {
+				httpError(w, http.StatusConflict, fmt.Sprintf(
+					"账号 %s 下仍有 %d 台节点，删除配置后它们将脱离管理；确认请加 ?force=1", name, len(servers)))
+				return
+			}
+		}
+	}
+	old := s.cfg.Accounts
+	if err := s.cfg.Remove(name); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		s.cfg.Accounts = old // 回滚内存
+		httpError(w, http.StatusInternalServerError, "保存账号文件失败: "+err.Error())
+		return
+	}
+	for i := range s.clients {
+		if s.clients[i].Name == name {
+			s.clients = append(s.clients[:i], s.clients[i+1:]...)
+			break
+		}
+	}
+	delete(s.byAccount, name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+}
+
 // handleNMSPayload 生成 NMS 台账导入载荷（04 §1.1）。因含明文 SSH 密码，
 // 仅限回环；无公网 IPv4 的节点跳过（NMS 要求 management_ip），
 // 跳过数放 X-Vpsctl-Skipped 头供前端提示。
@@ -553,10 +659,27 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 		}
 		keep = append(keep, sv)
 	}
+	// SSH 连通性预检：22 端口不通的同样跳过（与 CLI --format nms 同语义）
+	hosts := make([]string, 0, len(keep))
+	for _, sv := range keep {
+		hosts = append(hosts, sv.IPv4Public)
+	}
+	probe := fleet.ProbeSSHAll(r.Context(), hosts, s.probePort, s.probeTimeout)
+	unreachable := 0
+	filtered := keep[:0]
+	for _, sv := range keep {
+		if probe[sv.IPv4Public] != nil {
+			unreachable++
+			continue
+		}
+		filtered = append(filtered, sv)
+	}
+	keep = filtered
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="nms-nodes.json"`)
 	w.Header().Set("X-Vpsctl-Skipped", strconv.Itoa(skipped))
+	w.Header().Set("X-Vpsctl-Unreachable", strconv.Itoa(unreachable))
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts)})
 }

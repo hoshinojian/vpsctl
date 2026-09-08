@@ -170,8 +170,8 @@ tbody tr:hover { background: #1c2233; }
 <div class="overlay" id="modal-acct" hidden>
   <div class="modal">
     <h2>账号管理</h2>
-    <div id="acct-list" class="dellist"></div>
-    <h2 style="font-size:14px;margin-top:14px">新增账号（保存到 accounts.json 并立即生效）</h2>
+    <div id="acct-list"></div>
+    <h2 style="font-size:14px;margin-top:14px" id="ac-form-title">新增账号（保存到 accounts.json 并立即生效）</h2>
     <div class="form-grid">
       <label>账号名（唯一，用于命名与过滤）
         <input id="ac-name" autocomplete="off">
@@ -179,19 +179,22 @@ tbody tr:hover { background: #1c2233; }
       <label>提供商
         <select id="ac-provider"></select>
       </label>
-      <label style="grid-column:1/-1">API Token
+      <label style="grid-column:1/-1">API Token（编辑时留空 = 不变）
         <input id="ac-token" type="password" autocomplete="new-password">
       </label>
       <label>SSH 用户（留空 = root）
         <input id="ac-sshuser" autocomplete="off">
       </label>
-      <label>SSH 密码（可空；配置后创建自动注入、NMS 导出携带）
+      <label>SSH 密码（编辑时留空 = 不变）
         <input id="ac-sshpass" type="password" autocomplete="new-password">
       </label>
     </div>
+    <label class="opt" id="ac-clear-row" style="display:none">
+      <input type="checkbox" id="ac-clear"> 清除 SSH 密码</label>
     <p id="ac-msg" style="color:var(--dim);font-size:12px;margin:6px 0 0"></p>
     <div class="modal-actions">
       <button id="ac-cancel">关闭</button>
+      <button id="ac-edit-cancel" style="display:none">取消编辑</button>
       <button id="ac-submit" class="accent">新增账号</button>
     </div>
   </div>
@@ -667,6 +670,19 @@ $('rz-confirm').onclick = async () => {
 };
 
 /* ---- 账号管理与 NMS 载荷导出 ---- */
+let editingAccount = null; // null = 新增模式；字符串 = 正在编辑的账号名
+
+function resetAcctForm() {
+  editingAccount = null;
+  $('ac-form-title').textContent = '新增账号（保存到 accounts.json 并立即生效）';
+  $('ac-name').value = ''; $('ac-name').disabled = false;
+  $('ac-token').value = ''; $('ac-sshuser').value = ''; $('ac-sshpass').value = '';
+  $('ac-clear').checked = false;
+  $('ac-clear-row').style.display = 'none';
+  $('ac-edit-cancel').style.display = 'none';
+  $('ac-submit').textContent = '新增账号';
+}
+
 async function loadAccounts() {
   try {
     const r = await fetch('/api/accounts');
@@ -679,8 +695,19 @@ async function loadAccounts() {
     if (!(j.accounts || []).length) lst.textContent = '还没有账号';
     (j.accounts || []).forEach(a => {
       const div = document.createElement('div');
-      div.textContent = `${a.name} · ${a.provider} · ssh: ${a.ssh_user || 'root'}`
+      div.style.display = 'flex'; div.style.alignItems = 'center'; div.style.gap = '8px';
+      const text = document.createElement('span');
+      text.textContent = `${a.name} · ${a.provider} · ssh: ${a.ssh_user || 'root'}`
         + (a.has_password ? ' · 密码已配置' : ' · 无密码');
+      const btnEdit = document.createElement('button');
+      btnEdit.textContent = '编辑';
+      btnEdit.onclick = () => startEdit(a);
+      const btnDel = document.createElement('button');
+      btnDel.className = 'danger'; btnDel.textContent = '删除';
+      btnDel.style.padding = '2px 10px';
+      btnDel.onclick = () => removeAccount(a.name);
+      const spacer = document.createElement('span'); spacer.style.flex = '1';
+      div.append(text, spacer, btnEdit, btnDel);
       lst.append(div);
     });
     const sel = $('ac-provider');
@@ -691,29 +718,73 @@ async function loadAccounts() {
   } catch (e) { $('ac-msg').textContent = '请求失败: ' + e; }
 }
 
-$('btn-accounts').onclick = () => { $('modal-acct').hidden = false; loadAccounts(); };
+$('btn-accounts').onclick = () => { $('modal-acct').hidden = false; resetAcctForm(); loadAccounts(); };
 $('ac-cancel').onclick = () => ($('modal-acct').hidden = true);
+$('ac-edit-cancel').onclick = resetAcctForm;
+
+function startEdit(a) {
+  editingAccount = a.name;
+  $('ac-form-title').textContent = `编辑账号 ${a.name}`;
+  $('ac-name').value = a.name; $('ac-name').disabled = true;
+  $('ac-provider').value = a.provider;
+  $('ac-token').value = '';
+  $('ac-sshuser').value = a.ssh_user || '';
+  $('ac-sshpass').value = '';
+  $('ac-clear').checked = false;
+  $('ac-clear-row').style.display = '';
+  $('ac-edit-cancel').style.display = '';
+  $('ac-submit').textContent = '保存修改';
+  $('ac-msg').textContent = '';
+}
+
+async function removeAccount(name) {
+  if (!confirm(`删除账号 ${name} 只会移除本地配置，提供商侧机器不受影响。确认删除？`)) return;
+  try {
+    let r = await fetch('/api/accounts/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (r.status === 409) {
+      const j = await r.json().catch(() => ({}));
+      if (!confirm((j.error || '该账号下仍有节点') + '\n仍要删除配置？')) return;
+      r = await fetch('/api/accounts/' + encodeURIComponent(name) + '?force=1', { method: 'DELETE' });
+    }
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      banner('删除失败: ' + (j.error || r.status), true);
+      return;
+    }
+    toast(`账号 ${name} 已删除`);
+    if (editingAccount === name) resetAcctForm();
+    await loadAccounts();
+    await load();
+  } catch (e) { banner('请求失败: ' + e, true); }
+}
+
 $('ac-submit').onclick = async () => {
-  const body = {
-    name: $('ac-name').value.trim(),
-    provider: $('ac-provider').value,
+  const base = {
     token: $('ac-token').value.trim(),
     ssh_user: $('ac-sshuser').value.trim(),
     ssh_password: $('ac-sshpass').value,
+    clear_password: $('ac-clear').checked,
   };
-  if (!body.name || !body.token) { $('ac-msg').textContent = '账号名和 API token 必填'; return; }
   $('ac-submit').disabled = true;
   $('ac-msg').textContent = '提交中…';
   try {
-    const r = await fetch('/api/accounts', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    let r;
+    if (editingAccount) {
+      r = await fetch('/api/accounts/' + encodeURIComponent(editingAccount), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(base),
+      });
+    } else {
+      if (!base.token) { $('ac-msg').textContent = 'API token 必填'; return; }
+      r = await fetch('/api/accounts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ name: $('ac-name').value.trim(), provider: $('ac-provider').value }, base)),
+      });
+    }
     const j = await r.json();
     if (!r.ok) { $('ac-msg').textContent = '失败: ' + (j.error || r.status); return; }
-    toast(`账号 ${body.name} 已新增并立即生效`);
-    $('ac-name').value = $('ac-token').value = $('ac-sshuser').value = $('ac-sshpass').value = '';
-    $('ac-msg').textContent = '';
+    toast(editingAccount ? `账号 ${editingAccount} 已更新` : `账号 ${$('ac-name').value.trim()} 已新增并立即生效`);
+    resetAcctForm();
     await loadAccounts();
     await load();
   } catch (e) { $('ac-msg').textContent = '请求失败: ' + e; }
@@ -730,6 +801,7 @@ $('btn-nms').onclick = async () => {
       return;
     }
     const skipped = parseInt(r.headers.get('X-Vpsctl-Skipped') || '0', 10);
+    const unreachable = parseInt(r.headers.get('X-Vpsctl-Unreachable') || '0', 10);
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -740,7 +812,8 @@ $('btn-nms').onclick = async () => {
     a.remove();
     URL.revokeObjectURL(url);
     toast('已下载 NMS 载荷（含明文密码，注意保管）'
-      + (skipped ? `；已跳过 ${skipped} 台无公网 IP 的节点` : ''));
+      + (skipped ? `；跳过 ${skipped} 台无公网 IP` : '')
+      + (unreachable ? `；跳过 ${unreachable} 台 SSH 端口不可达` : ''));
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 

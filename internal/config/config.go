@@ -82,6 +82,30 @@ func (f *File) Validate() error {
 	return nil
 }
 
+// Find 按账号名查找；不存在返回 nil。
+func (f *File) Find(name string) *Account {
+	for i := range f.Accounts {
+		if f.Accounts[i].Name == name {
+			return &f.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// Remove 删除账号；删除最后一个账号拒绝（配置要求 accounts 非空）。
+func (f *File) Remove(name string) error {
+	for i := range f.Accounts {
+		if f.Accounts[i].Name == name {
+			if len(f.Accounts) == 1 {
+				return errors.New("不能删除最后一个账号（accounts 至少保留一个）")
+			}
+			f.Accounts = append(f.Accounts[:i], f.Accounts[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("账号 %q 不存在", name)
+}
+
 // Save 把配置写回 path（0600——文件含 token/密码）。整体覆盖：accounts.json
 // 契约就是 {accounts:[…]}，没有需要保留的注释或扩展字段。
 func Save(path string, f *File) error {

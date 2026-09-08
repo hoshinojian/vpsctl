@@ -33,6 +33,18 @@ make build   # 产物 bin/vpsctl
   `--user-data` 互斥，同给报错）；`list --format nms` 导出 NMS 载荷时带上
 - 加载时若文件权限过宽会告警（token 文件建议 `chmod 600`）
 
+### 账号管理（CLI 与管理台两端等价）
+
+```sh
+vpsctl accounts list                                     # 脱敏列表（密码只显示有无）
+vpsctl accounts add --name do-3 --token dop_v1_xxx --ssh-password pw
+vpsctl accounts edit --name do-3 --ssh-user deploy --clear-password
+vpsctl accounts remove --name do-3 [--force]             # 有节点时要求 --force
+```
+
+管理台「账号…」弹窗支持同样操作（新增/编辑/删除），且 serve 运行中**即时生效**；
+CLI 改的是文件本身，运行中的 serve 不会自动感知（用管理台改，或改完重启 serve）。
+
 ## 批量创建：`vpsctl create`
 
 ```sh
@@ -94,6 +106,9 @@ curl -s -X POST http://<nms-host>:<port>/api/v1/topology -d @nms-nodes.json
 - `device_type`/`ssh_port`/`ssh_user` 按缺省显式填好（vps / 22 / 账号级 `ssh_user` 或 root）
 - `ssh_password` 取账号级配置，未配置的账号会告警（NMS 录入密码必填，会被拒绝）
 - 无公网 IPv4 的节点跳过并提示（NMS 要求合法 `management_ip`）
+- **SSH 连通性预检**：导出前对每台探测 22 端口（2s 超时），不通的跳过并提示
+  （防止把连不上的机器灌进 NMS 变死台账）；`--no-check-ssh` 可关闭。
+  管理台「导出 NMS 载荷」按钮行为一致，跳过数经响应头提示
 - 另附 `provider`/`ram_mb`/`disk_gb`/`cpu_cores`/`cost_monthly`/`provisioned_at`
   冗余字段（NMS 现载荷忽略，扩契约后直接可用）
 - **载荷含明文密码**：`--output` 文件按 600 权限写入，勿提交进任何仓库
