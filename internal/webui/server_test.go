@@ -700,3 +700,88 @@ func TestRebuildResizeEndpoints(t *testing.T) {
 		t.Errorf("空 targets 应 400, got %d", code)
 	}
 }
+
+func TestEditAndRemoveAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "accounts.json")
+	cfg := &config.File{Accounts: []config.Account{
+		{Name: "a1", Provider: "digitalocean", Token: "t1", SSHUser: "root", SSHPassword: "pw1"},
+		{Name: "a2", Provider: "digitalocean", Token: "t2"},
+	}}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	clients := []fleet.AccountClient{
+		{Name: "a1", ProviderName: "digitalocean", Provider: &fakeProvider{servers: []provider.Server{{ID: "1", Account: "a1"}}}},
+		{Name: "a2", ProviderName: "digitalocean", Provider: &fakeProvider{}},
+	}
+	s := New(clients, cfg, cfgPath)
+	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// 编辑：只改提供的字段（token 留空不变，密码清除）
+	code, _ := sendJSON(t, http.MethodPut, srv.URL+"/api/accounts/a1", map[string]any{
+		"ssh_user": "deploy", "clear_password": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("edit status = %d", code)
+	}
+	f, _, _ := config.Load(cfgPath)
+	a := f.Find("a1")
+	if a.SSHUser != "deploy" || a.SSHPassword != "" || a.Token != "t1" {
+		t.Errorf("编辑结果不符: %+v", a)
+	}
+
+	// 删除：有机器时拒绝
+	code, out := postJSONRaw(t, srv.URL+"/api/accounts/a1", nil)
+	if code != http.StatusConflict {
+		t.Errorf("有机器应 409, got %d out=%v", code, out)
+	}
+	// force 删除
+	code, _ = postJSONRaw(t, srv.URL+"/api/accounts/a1?force=1", nil)
+	if code != http.StatusOK {
+		t.Fatalf("force 删除应 200, got %d", code)
+	}
+	f, _, _ = config.Load(cfgPath)
+	if f.Find("a1") != nil || len(f.Accounts) != 1 {
+		t.Errorf("删除未持久化: %+v", f.Accounts)
+	}
+	// 删除最后一个账号
+	code, _ = postJSONRaw(t, srv.URL+"/api/accounts/a2?force=1", nil)
+	if code != http.StatusBadRequest {
+		t.Errorf("删最后账号应 400, got %d", code)
+	}
+	// 编辑不存在的账号
+	code, _ = sendJSON(t, http.MethodPut, srv.URL+"/api/accounts/nope", map[string]any{"ssh_user": "x"})
+	if code != http.StatusNotFound {
+		t.Errorf("编辑不存在账号应 404, got %d", code)
+	}
+}
+
+// postJSONRaw 发送 DELETE 请求，返回状态码与解析后的 JSON。
+func postJSONRaw(t *testing.T, url string, _ any) (int, map[string]any) {
+	t.Helper()
+	return sendJSON(t, http.MethodDelete, url, nil)
+}
+
+// sendJSON 发送任意方法的 JSON 请求，返回状态码与解析后的 JSON。
+func sendJSON(t *testing.T, method, url string, body any) (int, map[string]any) {
+	t.Helper()
+	var data []byte
+	if body != nil {
+		data, _ = json.Marshal(body)
+	}
+	req, err := http.NewRequest(method, url, strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}

@@ -141,3 +141,26 @@ func TestDefaultPath(t *testing.T) {
 		t.Errorf("override 未生效: %q", got2)
 	}
 }
+
+func TestFileFindAndRemove(t *testing.T) {
+	f := &File{Accounts: []Account{
+		{Name: "do-1", Provider: "digitalocean", Token: "t1"},
+		{Name: "do-2", Provider: "digitalocean", Token: "t2"},
+	}}
+	if a := f.Find("do-2"); a == nil || a.Token != "t2" {
+		t.Errorf("Find = %+v", a)
+	}
+	if f.Find("nope") != nil {
+		t.Error("不存在应返回 nil")
+	}
+	// 删除最后一个账号必须拒绝
+	if err := f.Remove("do-1"); err != nil {
+		t.Errorf("Remove do-1: %v", err)
+	}
+	if err := f.Remove("do-2"); err == nil || !strings.Contains(err.Error(), "至少保留") {
+		t.Errorf("删除最后账号应拒绝: %v", err)
+	}
+	if len(f.Accounts) != 1 {
+		t.Errorf("删除失败时不应变更: %+v", f.Accounts)
+	}
+}

@@ -177,3 +177,6 @@ func failOnOpErrors(res []fleet.OpResult) error {
 	}
 	return nil
 }
+
+// bgContext 无中断信号的朴素后台上下文（短命令用）。
+func bgContext() context.Context { return context.Background() }

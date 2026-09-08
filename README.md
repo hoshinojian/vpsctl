@@ -33,6 +33,18 @@ make build   # 产物 bin/vpsctl
   `--user-data` 互斥，同给报错）；`list --format nms` 导出 NMS 载荷时带上
 - 加载时若文件权限过宽会告警（token 文件建议 `chmod 600`）
 
+### 账号管理（CLI 与管理台两端等价）
+
+```sh
+vpsctl accounts list                                     # 脱敏列表（密码只显示有无）
+vpsctl accounts add --name do-3 --token dop_v1_xxx --ssh-password pw
+vpsctl accounts edit --name do-3 --ssh-user deploy --clear-password
+vpsctl accounts remove --name do-3 [--force]             # 有节点时要求 --force
+```
+
+管理台「账号…」弹窗支持同样操作（新增/编辑/删除），且 serve 运行中**即时生效**；
+CLI 改的是文件本身，运行中的 serve 不会自动感知（用管理台改，或改完重启 serve）。
+
 ## 批量创建：`vpsctl create`
 
 ```sh
