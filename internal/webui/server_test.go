@@ -845,3 +845,47 @@ func sendJSON(t *testing.T, method, url string, body any) (int, map[string]any) 
 	_ = json.NewDecoder(resp.Body).Decode(&out)
 	return resp.StatusCode, out
 }
+
+func TestOperationHistory(t *testing.T) {
+	fp := &fakeProvider{servers: []provider.Server{}}
+	srv := testServer(t, map[string]*fakeProvider{"a1": fp})
+
+	// 一次成功关机 + 一次删除
+	postJSON(t, srv.URL+"/api/power", map[string]any{
+		"action": "power_off", "targets": []map[string]string{{"account": "a1", "id": "7"}},
+	})
+	postJSON(t, srv.URL+"/api/delete", map[string]any{
+		"count": 1, "targets": []map[string]string{{"account": "a1", "id": "7"}},
+	})
+
+	resp, err := http.Get(srv.URL + "/api/operations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Operations []struct {
+			Kind   string `json:"kind"`
+			Detail string `json:"detail"`
+			OK     int    `json:"ok"`
+			Fail   int    `json:"fail"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Operations) != 2 {
+		t.Fatalf("operations = %+v", got.Operations)
+	}
+	// 最新在前：第一条是删除
+	if got.Operations[0].Kind != "delete" || got.Operations[0].OK != 1 {
+		t.Errorf("最新操作应为 delete: %+v", got.Operations[0])
+	}
+	if got.Operations[1].Kind != "power" || got.Operations[1].OK != 1 {
+		t.Errorf("第二条应为 power: %+v", got.Operations[1])
+	}
+	if strings.Contains(string(body), "token") || strings.Contains(string(body), "password") {
+		t.Error("操作历史不应包含凭据字段")
+	}
+}

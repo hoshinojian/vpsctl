@@ -98,6 +98,7 @@ tbody tr:hover { background: #1c2233; }
   <span id="selinfo">未选择</span>
   <button id="btn-create">创建节点…</button>
   <button id="btn-accounts">账号…</button>
+  <button id="btn-ops">操作记录</button>
   <button id="btn-nms" class="accent">导出 NMS 载荷</button>
   <button id="btn-poweroff" class="warn" disabled>关机</button>
   <button id="btn-poweron" disabled>开机</button>
@@ -232,6 +233,16 @@ tbody tr:hover { background: #1c2233; }
   </div>
 </div>
 
+<div class="overlay" id="modal-ops" hidden>
+  <div class="modal" style="width:min(680px,94vw)">
+    <h2>操作记录 <span style="color:var(--dim);font-size:12px;font-weight:normal">（最近 100 条，仅本 serve 进程内，重启即清）</span></h2>
+    <div id="ops-list" class="dellist" style="max-height:320px"></div>
+    <div class="modal-actions">
+      <button id="ops-close">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="modal-detail" hidden>
   <div class="modal" style="width:min(680px,94vw)">
     <h2>节点详情 <span id="dt-name" class="mono" style="font-size:14px;color:var(--accent)"></span></h2>
@@ -254,23 +265,37 @@ let toastTimer = null;
 
 const key = d => d.account + '/' + d.id;
 
+// fetchJSON 带超时的 JSON 请求：单接口挂起最多等 20s，不拖垮整页。
+function fetchJSON(url) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  return fetch(url, { signal: ctl.signal })
+    .then(r => r.json())
+    .finally(() => clearTimeout(timer));
+}
+
 async function load() {
-  try {
-    const [dr, cat, ac] = await Promise.all([
-      fetch('/api/droplets').then(r => r.json()),
-      fetch('/api/catalog').then(r => r.json()).catch(() => null),
-      fetch('/api/accounts').then(r => r.json()).catch(() => null),
-    ]);
-    droplets = dr.droplets || [];
-    acctErrors = dr.errors || [];
-    if (ac && Array.isArray(ac.accounts)) {
-      accountInfo = {};
-      ac.accounts.forEach(a => (accountInfo[a.name] = a));
-      if (ac.accounts.length) allAccounts = ac.accounts.map(a => a.name);
-    }
-    if (cat && Array.isArray(cat.accounts) && cat.accounts.length) allAccounts = cat.accounts;
-    render();
-  } catch (e) { banner('加载失败: ' + e, true); }
+  const [drRes, catRes, acRes] = await Promise.allSettled([
+    fetchJSON('/api/droplets'),
+    fetchJSON('/api/catalog'),
+    fetchJSON('/api/accounts'),
+  ]);
+  if (drRes.status === 'fulfilled') {
+    droplets = drRes.value.droplets || [];
+    acctErrors = drRes.value.errors || [];
+  } else {
+    banner('节点清单加载失败（见浏览器控制台与 serve 终端日志）: '
+      + (drRes.reason && drRes.reason.message ? drRes.reason.message : drRes.reason), true);
+  }
+  if (catRes.status === 'fulfilled' && catRes.value
+    && Array.isArray(catRes.value.accounts) && catRes.value.accounts.length)
+    allAccounts = catRes.value.accounts;
+  if (acRes.status === 'fulfilled' && acRes.value && Array.isArray(acRes.value.accounts)) {
+    accountInfo = {};
+    acRes.value.accounts.forEach(a => (accountInfo[a.name] = a));
+    if (acRes.value.accounts.length) allAccounts = acRes.value.accounts.map(a => a.name);
+  }
+  render();
 }
 
 function filtered() {
@@ -575,6 +600,29 @@ $('cr-submit').onclick = async () => {
   }
 };
 
+/* ---- 操作记录 ---- */
+$('btn-ops').onclick = async () => {
+  $('modal-ops').hidden = false;
+  const lst = $('ops-list');
+  lst.textContent = '加载中…';
+  try {
+    const r = await fetch('/api/operations');
+    const j = await r.json();
+    lst.textContent = '';
+    const ops = j.operations || [];
+    if (!ops.length) { lst.textContent = '还没有操作记录'; return; }
+    ops.forEach(o => {
+      const div = document.createElement('div');
+      const t = new Date(o.time).toLocaleString();
+      div.textContent = `${t} · ${o.kind} · ${o.detail}`
+        + (o.fail ? ` · 成功 ${o.ok} 失败 ${o.fail}` : ` · 全部成功（${o.ok}）`);
+      div.style.color = o.fail ? 'var(--warn)' : 'var(--fg)';
+      lst.append(div);
+    });
+  } catch (e) { lst.textContent = '加载失败: ' + e; }
+};
+$('ops-close').onclick = () => ($('modal-ops').hidden = true);
+
 /* ---- 节点详情 ---- */
 let accountInfo = {}; // account -> {ssh_user, has_password, provider}
 
@@ -628,23 +676,23 @@ $('dt-close').onclick = () => ($('modal-detail').hidden = true);
 function openMaint(prefix) {
   const ds = selDroplets();
   if (!ds.length) return;
-  $(`#${prefix}-count`).textContent = ds.length;
-  $(`#${prefix}-need`).textContent = ds.length;
-  const lst = $(`#${prefix}-list`);
+  $(`${prefix}-count`).textContent = ds.length;
+  $(`${prefix}-need`).textContent = ds.length;
+  const lst = $(`${prefix}-list`);
   lst.textContent = '';
   ds.forEach(d => {
     const div = document.createElement('div');
     div.textContent = `${d.name}  (${d.account} / ${d.ipv4_public || '无 IP'})`;
     lst.append(div);
   });
-  $(`#${prefix}-input`).value = '';
-  $(`#${prefix}-confirm`).disabled = true;
-  $(`#modal-${prefix}`).hidden = false;
-  $(`#${prefix}-input`).focus();
+  $(`${prefix}-input`).value = '';
+  $(`${prefix}-confirm`).disabled = true;
+  $(`modal-${prefix}`).hidden = false;
+  $(`${prefix}-input`).focus();
 }
 function watchMaint(prefix, extraCheck) {
-  $(`#${prefix}-input`).oninput = e => {
-    $(`#${prefix}-confirm`).disabled =
+  $(`${prefix}-input`).oninput = e => {
+    $(`${prefix}-confirm`).disabled =
       e.target.value.trim() !== String(selDroplets().length) || !(extraCheck ? extraCheck() : true);
   };
 }
@@ -817,8 +865,11 @@ $('btn-nms').onclick = async () => {
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 
-load();
-setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden) load(); }, 30000);
+</script>
+<!-- 独立脚本块：主脚本若有求值期异常，清单加载仍能独立运行 -->
+<script>
+try { load(); } catch (e) { banner('初始化失败: ' + e, true); }
+setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden && $('modal-ops').hidden) load(); }, 30000);
 </script>
 </body>
 </html>
