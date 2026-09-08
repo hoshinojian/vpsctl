@@ -96,6 +96,8 @@ tbody tr:hover { background: #1c2233; }
 <div class="toolbar">
   <span id="selinfo">未选择</span>
   <button id="btn-create">创建节点…</button>
+  <button id="btn-accounts">账号…</button>
+  <button id="btn-nms" class="accent">导出 NMS 载荷</button>
   <button id="btn-poweroff" class="warn" disabled>关机</button>
   <button id="btn-poweron" disabled>开机</button>
   <button id="btn-delete" class="danger" disabled>删除…</button>
@@ -158,6 +160,36 @@ tbody tr:hover { background: #1c2233; }
     <div class="modal-actions">
       <button id="cr-cancel">取消</button>
       <button id="cr-submit" class="accent">创建</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-acct" hidden>
+  <div class="modal">
+    <h2>账号管理</h2>
+    <div id="acct-list" class="dellist"></div>
+    <h2 style="font-size:14px;margin-top:14px">新增账号（保存到 accounts.json 并立即生效）</h2>
+    <div class="form-grid">
+      <label>账号名（唯一，用于命名与过滤）
+        <input id="ac-name" autocomplete="off">
+      </label>
+      <label>提供商
+        <select id="ac-provider"></select>
+      </label>
+      <label style="grid-column:1/-1">API Token
+        <input id="ac-token" type="password" autocomplete="new-password">
+      </label>
+      <label>SSH 用户（留空 = root）
+        <input id="ac-sshuser" autocomplete="off">
+      </label>
+      <label>SSH 密码（可空；配置后创建自动注入、NMS 导出携带）
+        <input id="ac-sshpass" type="password" autocomplete="new-password">
+      </label>
+    </div>
+    <p id="ac-msg" style="color:var(--dim);font-size:12px;margin:6px 0 0"></p>
+    <div class="modal-actions">
+      <button id="ac-cancel">关闭</button>
+      <button id="ac-submit" class="accent">新增账号</button>
     </div>
   </div>
 </div>
@@ -485,8 +517,84 @@ $('cr-submit').onclick = async () => {
   }
 };
 
+/* ---- 账号管理与 NMS 载荷导出 ---- */
+async function loadAccounts() {
+  try {
+    const r = await fetch('/api/accounts');
+    const j = await r.json();
+    if (!r.ok) { $('ac-msg').textContent = '失败: ' + (j.error || r.status); return; }
+    const lst = $('acct-list');
+    lst.textContent = '';
+    if (!(j.accounts || []).length) lst.textContent = '还没有账号';
+    (j.accounts || []).forEach(a => {
+      const div = document.createElement('div');
+      div.textContent = `${a.name} · ${a.provider} · ssh: ${a.ssh_user || 'root'}`
+        + (a.has_password ? ' · 密码已配置' : ' · 无密码');
+      lst.append(div);
+    });
+    const sel = $('ac-provider');
+    const cur = sel.value;
+    sel.textContent = '';
+    (j.providers || ['digitalocean']).forEach(p => sel.append(new Option(p, p)));
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  } catch (e) { $('ac-msg').textContent = '请求失败: ' + e; }
+}
+
+$('btn-accounts').onclick = () => { $('modal-acct').hidden = false; loadAccounts(); };
+$('ac-cancel').onclick = () => ($('modal-acct').hidden = true);
+$('ac-submit').onclick = async () => {
+  const body = {
+    name: $('ac-name').value.trim(),
+    provider: $('ac-provider').value,
+    token: $('ac-token').value.trim(),
+    ssh_user: $('ac-sshuser').value.trim(),
+    ssh_password: $('ac-sshpass').value,
+  };
+  if (!body.name || !body.token) { $('ac-msg').textContent = '账号名和 API token 必填'; return; }
+  $('ac-submit').disabled = true;
+  $('ac-msg').textContent = '提交中…';
+  try {
+    const r = await fetch('/api/accounts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) { $('ac-msg').textContent = '失败: ' + (j.error || r.status); return; }
+    toast(`账号 ${body.name} 已新增并立即生效`);
+    $('ac-name').value = $('ac-token').value = $('ac-sshuser').value = $('ac-sshpass').value = '';
+    $('ac-msg').textContent = '';
+    await loadAccounts();
+    await load();
+  } catch (e) { $('ac-msg').textContent = '请求失败: ' + e; }
+  finally { $('ac-submit').disabled = false; }
+};
+
+$('btn-nms').onclick = async () => {
+  if (!confirm('导出的 NMS 载荷包含明文 SSH 密码，下载后请勿提交进任何仓库。\n继续下载？')) return;
+  try {
+    const r = await fetch('/api/nms-payload');
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      banner('导出失败: ' + (j.error || r.status), true);
+      return;
+    }
+    const skipped = parseInt(r.headers.get('X-Vpsctl-Skipped') || '0', 10);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'nms-nodes.json';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('已下载 NMS 载荷（含明文密码，注意保管）'
+      + (skipped ? `；已跳过 ${skipped} 台无公网 IP 的节点` : ''));
+  } catch (e) { banner('导出失败: ' + e, true); }
+};
+
 load();
-setInterval(() => { if ($('modal-del').hidden) load(); }, 30000);
+setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden) load(); }, 30000);
 </script>
 </body>
 </html>

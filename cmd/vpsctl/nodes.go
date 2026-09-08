@@ -49,7 +49,7 @@ func runNodeList(args []string) error {
 		return fmt.Errorf("未知格式 %q（可选 json | nms）", *format)
 	}
 
-	cfg, err := loadAccounts(*accounts)
+	cfg, _, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}

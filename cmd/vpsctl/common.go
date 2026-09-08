@@ -10,20 +10,21 @@ import (
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
-// loadAccounts 解析并加载账号配置，权限告警打到 stderr。
-func loadAccounts(pathOverride string) (*config.File, error) {
+// loadAccounts 解析并加载账号配置（含路径，供 serve 热更新账号落盘），
+// 权限告警打到 stderr。
+func loadAccounts(pathOverride string) (*config.File, string, error) {
 	path, err := config.DefaultPath(pathOverride)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	f, warns, err := config.Load(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	for _, w := range warns {
 		fmt.Fprintln(os.Stderr, "警告:", w)
 	}
-	return f, nil
+	return f, path, nil
 }
 
 // buildClients 为每个账号构造客户端。
