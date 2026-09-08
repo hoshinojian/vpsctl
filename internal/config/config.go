@@ -11,10 +11,14 @@ import (
 )
 
 // Account 是单个提供商账号的凭据描述。
+// SSHUser/SSHPassword 可选：用于创建时注入密码（cloud-config）与
+// `list --format nms` 导出 NMS 台账载荷（NMS 录入 ssh_password 必填）。
 type Account struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	Token    string `json:"token"`
+	Name        string `json:"name"`
+	Provider    string `json:"provider"`
+	Token       string `json:"token"`
+	SSHUser     string `json:"ssh_user,omitempty"`
+	SSHPassword string `json:"ssh_password,omitempty"`
 }
 
 // File 是 accounts.json 的顶层结构。

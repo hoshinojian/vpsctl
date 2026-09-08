@@ -24,21 +24,23 @@ type AccountClient struct {
 
 // Options 描述一次批量创建。
 type Options struct {
-	Clients     []AccountClient
-	Count       int    // 每账号台数
-	Prefix      string // 命名前缀
-	StartIndex  int    // 序号起始，默认 1
-	Region      string
-	Size        string
-	Image       string
-	SSHKeys     []string
-	ExtraTags   []string // 自动追加 batch:<时间戳>
-	UserData    string
-	Monitoring  bool
-	WaitTimeout time.Duration // >0 时等待 active 且有公网 IPv4
-	PollEvery   time.Duration // 轮询间隔，默认 5s
-	Concurrency int           // 单账号并发，默认 4
-	Now         func() time.Time
+	Clients    []AccountClient
+	Count      int    // 每账号台数
+	Prefix     string // 命名前缀
+	StartIndex int    // 序号起始，默认 1
+	Region     string
+	Size       string
+	Image      string
+	SSHKeys    []string
+	ExtraTags  []string // 自动追加 batch:<时间戳>
+	UserData   string   // cloud-init 脚本，可空（全部账号共用）
+	// UserDataByAccount 账号专属 user-data（如账号级密码注入），存在时优先于 UserData。
+	UserDataByAccount map[string]string
+	Monitoring        bool
+	WaitTimeout       time.Duration // >0 时等待 active 且有公网 IPv4
+	PollEvery         time.Duration // 轮询间隔，默认 5s
+	Concurrency       int           // 单账号并发，默认 4
+	Now               func() time.Time
 }
 
 // PlanEntry 是 dry-run 的单账号计划。
@@ -219,11 +221,15 @@ func createAccount(ctx context.Context, o Options, ac AccountClient, batch strin
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			userData := o.UserData
+			if ud, ok := o.UserDataByAccount[ac.Name]; ok {
+				userData = ud
+			}
 			s, err := ac.Provider.Create(ctx, provider.CreateRequest{
 				Name: name, Region: o.Region, Size: o.Size, Image: o.Image,
 				SSHKeys:    o.SSHKeys,
 				Tags:       append(append([]string{}, o.ExtraTags...), "batch:"+batch),
-				UserData:   o.UserData,
+				UserData:   userData,
 				Monitoring: o.Monitoring,
 			})
 			if err != nil {
@@ -249,7 +255,7 @@ func createAccount(ctx context.Context, o Options, ac AccountClient, batch strin
 				}
 			}
 			mu.Lock()
-			out.created = append(out.created, toServerJSON(s))
+			out.created = append(out.created, ToServerJSON(s))
 			mu.Unlock()
 		}(idx, name)
 	}
@@ -296,7 +302,8 @@ func waitForActive(ctx context.Context, p provider.Provider, id string, timeout,
 	}
 }
 
-func toServerJSON(s provider.Server) ServerJSON {
+// ToServerJSON 把提供商统一视图转为结果 JSON 形态（create 结果与 list 子命令共用）。
+func ToServerJSON(s provider.Server) ServerJSON {
 	return ServerJSON{
 		Account: s.Account, ID: s.ID, Name: s.Name, Status: s.Status,
 		Region: s.Region, Size: s.Size, Image: s.Image,

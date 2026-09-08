@@ -69,6 +69,25 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
+func TestLoadSSHCredentials(t *testing.T) {
+	path := writeAccounts(t, `{"accounts":[
+		{"name":"do-1","provider":"digitalocean","token":"t1",
+		 "ssh_user":"deploy","ssh_password":"p@ss'w\"ord"},
+		{"name":"do-2","provider":"digitalocean","token":"t2"}
+	]}`, 0o600)
+	f, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if f.Accounts[0].SSHUser != "deploy" || f.Accounts[0].SSHPassword != `p@ss'w"ord` {
+		t.Errorf("凭据未解析: %+v", f.Accounts[0])
+	}
+	// 可选字段缺省为空，不报错
+	if f.Accounts[1].SSHUser != "" || f.Accounts[1].SSHPassword != "" {
+		t.Errorf("未配置凭据应为空: %+v", f.Accounts[1])
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Setenv("VPSCTL_ACCOUNTS", "")
 	home, _ := os.UserHomeDir()

@@ -3,7 +3,9 @@
     {
       "name": "do-1",
       "provider": "digitalocean",
-      "token": "REPLACE_ME_DIGITALOCEAN_PERSONAL_ACCESS_TOKEN"
+      "token": "REPLACE_ME_DIGITALOCEAN_PERSONAL_ACCESS_TOKEN",
+      "ssh_user": "root",
+      "ssh_password": "REPLACE_ME_SSH_PASSWORD"
     },
     {
       "name": "do-2",
