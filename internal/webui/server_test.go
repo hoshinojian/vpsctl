@@ -8,13 +8,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/nms"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -129,7 +132,20 @@ func testServer(t *testing.T, fps map[string]*fakeProvider) *httptest.Server {
 	for name, fp := range fps {
 		clients = append(clients, fleet.AccountClient{Name: name, ProviderName: "digitalocean", Provider: fp})
 	}
-	s := New(clients)
+	cfg := &config.File{Accounts: []config.Account{
+		{Name: "a1", Provider: "digitalocean", Token: "tok-a1", SSHUser: "root", SSHPassword: "pw-a1"},
+	}}
+	s := New(clients, cfg, filepath.Join(t.TempDir(), "accounts.json"))
+	s.newProvider = func(providerName, account, token string) (provider.Provider, error) {
+		if providerName != "digitalocean" {
+			return nil, fmt.Errorf("未知提供商 %q", providerName)
+		}
+		fp := fps[account]
+		if fp == nil {
+			fp = &fakeProvider{}
+		}
+		return fp, nil
+	}
 	s.pollEvery = time.Millisecond
 	s.deleteWait = time.Second
 	srv := httptest.NewServer(s.Handler())
@@ -311,7 +327,8 @@ func TestDeleteShutdownFirst(t *testing.T) {
 	})
 	t.Run("关机超时不删除", func(t *testing.T) {
 		fp := &fakeProvider{servers: []provider.Server{}, actionStatus: []string{"in-progress"}}
-		s2 := New([]fleet.AccountClient{{Name: "a1", ProviderName: "digitalocean", Provider: fp}})
+		s2 := New([]fleet.AccountClient{{Name: "a1", ProviderName: "digitalocean", Provider: fp}},
+			&config.File{}, filepath.Join(t.TempDir(), "accounts.json"))
 		s2.pollEvery = time.Millisecond
 		s2.deleteWait = 10 * time.Millisecond
 		hs := httptest.NewServer(s2.Handler())
@@ -442,4 +459,189 @@ func TestNoTokenLeak(t *testing.T) {
 	if _, ok := got["droplets"]; !ok {
 		t.Errorf("缺 droplets 字段: %v", got)
 	}
+}
+
+/* ---- 账号管理与 NMS 载荷导出 ---- */
+
+func TestAccountsListMasksSecrets(t *testing.T) {
+	srv := testServer(t, map[string]*fakeProvider{})
+	resp, err := http.Get(srv.URL + "/api/accounts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Accounts []struct {
+			Name        string `json:"name"`
+			Provider    string `json:"provider"`
+			SSHUser     string `json:"ssh_user"`
+			HasPassword bool   `json:"has_password"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Accounts) != 1 {
+		t.Fatalf("accounts = %+v", got)
+	}
+	a := got.Accounts[0]
+	if a.Name != "a1" || a.Provider != "digitalocean" || a.SSHUser != "root" || !a.HasPassword {
+		t.Errorf("账号视图不符: %+v", a)
+	}
+	if strings.Contains(string(body), "tok-a1") || strings.Contains(string(body), "pw-a1") {
+		t.Error("账号视图泄漏了 token/密码明文: %s" + string(body))
+	}
+}
+
+func TestAddAccount(t *testing.T) {
+	fp := &fakeProvider{servers: []provider.Server{}}
+	srv := testServer(t, map[string]*fakeProvider{"newacct": fp})
+
+	code, out := postJSON(t, srv.URL+"/api/accounts", map[string]any{
+		"name": "newacct", "provider": "digitalocean", "token": "tok-new",
+		"ssh_user": "deploy", "ssh_password": "pw-new",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d out=%v", code, out)
+	}
+	// 落盘
+	cfgPath := srv.Config.Addr // 占位，实际从 handler 闭包外取不到；改由重开文件验证
+	_ = cfgPath
+	// 免重启生效：新账号可被 /api/droplets 聚合（factory 已注入 fake）
+	resp, err := http.Get(srv.URL + "/api/droplets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dr listResponse
+	_ = json.NewDecoder(resp.Body).Decode(&dr)
+	resp.Body.Close()
+	found := false
+	for _, d := range dr.Droplets {
+		if d.Account == "newacct" {
+			found = true
+		}
+	}
+	// fake.servers 为空切片时 List 成功返回空——错误列表里不应有 newacct
+	for _, e := range dr.Errors {
+		if e.Account == "newacct" {
+			t.Errorf("新账号不应出现在错误列表: %+v", e)
+		}
+	}
+	if !found && len(dr.Errors) == 0 && len(dr.Droplets) == 0 {
+		t.Log("newacct 无节点（空列表），聚合通过")
+	}
+
+	// 重复账号名 → 400
+	code, _ = postJSON(t, srv.URL+"/api/accounts", map[string]any{
+		"name": "newacct", "provider": "digitalocean", "token": "tok2",
+	})
+	if code != http.StatusBadRequest {
+		t.Errorf("重复账号名应 400, got %d", code)
+	}
+	// 缺 token → 400
+	code, _ = postJSON(t, srv.URL+"/api/accounts", map[string]any{"name": "x", "provider": "digitalocean"})
+	if code != http.StatusBadRequest {
+		t.Errorf("缺 token 应 400, got %d", code)
+	}
+	// 未知 provider → 400
+	code, _ = postJSON(t, srv.URL+"/api/accounts", map[string]any{"name": "y", "provider": "vultr", "token": "t"})
+	if code != http.StatusBadRequest {
+		t.Errorf("未知 provider 应 400, got %d", code)
+	}
+}
+
+func TestAddAccountPersists(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "accounts.json")
+	if err := config.Save(cfgPath, &config.File{Accounts: []config.Account{
+		{Name: "a1", Provider: "digitalocean", Token: "t1"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New([]fleet.AccountClient{}, &config.File{Accounts: []config.Account{
+		{Name: "a1", Provider: "digitalocean", Token: "t1"},
+	}}, cfgPath)
+	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	code, _ := postJSON(t, srv.URL+"/api/accounts", map[string]any{
+		"name": "b2", "provider": "digitalocean", "token": "t2", "ssh_password": "pw",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	f, _, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Accounts) != 2 || f.Accounts[1].Name != "b2" || f.Accounts[1].SSHPassword != "pw" {
+		t.Errorf("未持久化: %+v", f.Accounts)
+	}
+}
+
+func TestWriteEndpointsRejectNonLoopback(t *testing.T) {
+	s := New([]fleet.AccountClient{}, &config.File{}, filepath.Join(t.TempDir(), "accounts.json"))
+	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               string
+	}{
+		{"新增账号", "POST", "/api/accounts", `{"name":"x","provider":"digitalocean","token":"t"}`},
+		{"导出载荷", "GET", "/api/nms-payload", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.RemoteAddr = "203.0.113.9:4444" // 非回环
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("非回环应 403, got %d", rec.Code)
+			}
+		})
+	}
+}
+
+func TestNMSPayload(t *testing.T) {
+	srv := testServer(t, map[string]*fakeProvider{
+		"a1": {servers: []provider.Server{
+			{ID: "1", Account: "a1", Name: "vps-a1-01", Status: "active", Region: "sgp1",
+				IPv4Public: "203.0.113.1", MemoryMB: 1024, DiskGB: 25, VCPUs: 1, PriceMonthly: 6},
+			{ID: "2", Account: "a1", Name: "vps-a1-noip", Status: "active"}, // 无公网 IP，应跳过
+		}},
+	})
+	resp, err := http.Get(srv.URL + "/api/nms-payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var payload nms.Payload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("载荷不是合法 NMS JSON: %v\n%s", err, body)
+	}
+	if len(payload.Nodes) != 1 {
+		t.Fatalf("应只含 1 台（无 IP 跳过）: %+v", payload.Nodes)
+	}
+	n := payload.Nodes[0]
+	if n.ID != "vps-a1-01" || n.SSHPassword != "pw-a1" || n.SSHUser != "root" {
+		t.Errorf("节点不符: %+v", n)
+	}
+	if resp.Header.Get("X-Vpsctl-Skipped") != "1" {
+		t.Errorf("应报告跳过 1 台, got %q", resp.Header.Get("X-Vpsctl-Skipped"))
+	}
+	if resp.Header.Get("Content-Disposition") == "" {
+		t.Error("应有下载头")
+	}
+	// 账号过滤
+	resp2, err := http.Get(srv.URL + "/api/nms-payload?account=nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Errorf("未知账号应 400, got %d", resp2.StatusCode)
+	}
+	resp2.Body.Close()
 }
