@@ -101,6 +101,8 @@ tbody tr:hover { background: #1c2233; }
   <button id="btn-nms" class="accent">导出 NMS 载荷</button>
   <button id="btn-poweroff" class="warn" disabled>关机</button>
   <button id="btn-poweron" disabled>开机</button>
+  <button id="btn-rebuild" class="warn" disabled>重装…</button>
+  <button id="btn-resize" disabled>改配…</button>
   <button id="btn-delete" class="danger" disabled>删除…</button>
 </div>
 
@@ -191,6 +193,38 @@ tbody tr:hover { background: #1c2233; }
     <div class="modal-actions">
       <button id="ac-cancel">关闭</button>
       <button id="ac-submit" class="accent">新增账号</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-rb" hidden>
+  <div class="modal">
+    <h2>批量重装</h2>
+    <p>重装即<b style="color:var(--danger)">清空磁盘数据、不可恢复</b>（保留 ID 与 IP）。
+      共 <b id="rb-count">0</b> 台：</p>
+    <div class="dellist" id="rb-list"></div>
+    <label>镜像 slug（可用 vpsctl images 查询）<input id="rb-image" class="mono" placeholder="ubuntu-24-04-x64" style="width:100%"></label>
+    <p>请输入台数 <b id="rb-need">0</b> 以确认：<input id="rb-input" size="4" inputmode="numeric" autocomplete="off"></p>
+    <p style="color:var(--dim);font-size:12px">重装通常需要 1-2 分钟，提交后请耐心等待结果。</p>
+    <div class="modal-actions">
+      <button id="rb-cancel">取消</button>
+      <button id="rb-confirm" class="danger" disabled>重装</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-rz" hidden>
+  <div class="modal">
+    <h2>批量改配</h2>
+    <p>流程：<b>关机 → 改配 → 开机</b>，共 <b id="rz-count">0</b> 台：</p>
+    <div class="dellist" id="rz-list"></div>
+    <label>目标套餐 slug（可用 vpsctl sizes 查询）<input id="rz-size" class="mono" placeholder="s-2vcpu-2gb" style="width:100%"></label>
+    <label class="opt"><input type="checkbox" id="rz-disk"> 同时扩磁盘（<b style="color:var(--warn)">不可逆</b>，只能扩不能缩）</label>
+    <p>请输入台数 <b id="rz-need">0</b> 以确认：<input id="rz-input" size="4" inputmode="numeric" autocomplete="off"></p>
+    <p style="color:var(--dim);font-size:12px">改配含两次关开机动作，通常需要 2-5 分钟。</p>
+    <div class="modal-actions">
+      <button id="rz-cancel">取消</button>
+      <button id="rz-confirm" class="accent" disabled>改配</button>
     </div>
   </div>
 </div>
@@ -331,7 +365,7 @@ function selDroplets() { return droplets.filter(d => selected.has(key(d))); }
 function updateBar(list) {
   const n = selected.size;
   $('selinfo').textContent = n ? `已选 ${n} 台 · 月费 $${selDroplets().reduce((s, d) => s + (d.price_monthly || 0), 0).toFixed(2)}` : '未选择';
-  for (const id of ['btn-poweroff', 'btn-poweron', 'btn-delete']) $(id).disabled = !n;
+  for (const id of ['btn-poweroff', 'btn-poweron', 'btn-delete', 'btn-rebuild', 'btn-resize']) $(id).disabled = !n;
   $('selall').checked = list && list.length > 0 && list.every(d => selected.has(key(d)));
 }
 
@@ -586,6 +620,51 @@ function openDetails(d) {
   $('modal-detail').hidden = false;
 }
 $('dt-close').onclick = () => ($('modal-detail').hidden = true);
+
+/* ---- 批量重装 / 改配 ---- */
+function openMaint(prefix) {
+  const ds = selDroplets();
+  if (!ds.length) return;
+  $(`#${prefix}-count`).textContent = ds.length;
+  $(`#${prefix}-need`).textContent = ds.length;
+  const lst = $(`#${prefix}-list`);
+  lst.textContent = '';
+  ds.forEach(d => {
+    const div = document.createElement('div');
+    div.textContent = `${d.name}  (${d.account} / ${d.ipv4_public || '无 IP'})`;
+    lst.append(div);
+  });
+  $(`#${prefix}-input`).value = '';
+  $(`#${prefix}-confirm`).disabled = true;
+  $(`#modal-${prefix}`).hidden = false;
+  $(`#${prefix}-input`).focus();
+}
+function watchMaint(prefix, extraCheck) {
+  $(`#${prefix}-input`).oninput = e => {
+    $(`#${prefix}-confirm`).disabled =
+      e.target.value.trim() !== String(selDroplets().length) || !(extraCheck ? extraCheck() : true);
+  };
+}
+$('btn-rebuild').onclick = () => { $('rb-image').value = ''; openMaint('rb'); };
+$('btn-resize').onclick = () => { $('rz-size').value = ''; $('rz-disk').checked = false; openMaint('rz'); };
+$('rb-cancel').onclick = () => ($('modal-rb').hidden = true);
+$('rz-cancel').onclick = () => ($('modal-rz').hidden = true);
+watchMaint('rb', () => $('rb-image').value.trim() !== '');
+watchMaint('rz', () => $('rz-size').value.trim() !== '');
+$('rb-image').oninput = () => $('rb-input').dispatchEvent(new Event('input'));
+$('rz-size').oninput = () => $('rz-input').dispatchEvent(new Event('input'));
+$('rb-confirm').onclick = async () => {
+  const ds = selDroplets(), image = $('rb-image').value.trim();
+  $('modal-rb').hidden = true;
+  banner(`重装 ${ds.length} 台执行中（约 1-2 分钟），完成后自动刷新…`);
+  await postOp('/api/rebuild', { targets: ds.map(d => ({ account: d.account, id: d.id })), image });
+};
+$('rz-confirm').onclick = async () => {
+  const ds = selDroplets(), size = $('rz-size').value.trim();
+  $('modal-rz').hidden = true;
+  banner(`改配 ${ds.length} 台执行中（关机→改配→开机，约 2-5 分钟），完成后自动刷新…`);
+  await postOp('/api/resize', { targets: ds.map(d => ({ account: d.account, id: d.id })), size, resize_disk: $('rz-disk').checked });
+};
 
 /* ---- 账号管理与 NMS 载荷导出 ---- */
 async function loadAccounts() {

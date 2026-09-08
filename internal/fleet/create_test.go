@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,12 +12,19 @@ import (
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
-// fakeProvider 只实现编排用到的 Create/Get，其余方法不该被调用。
+// fakeProvider 只实现编排用到的 Create/Get/Power/ActionStatus/Delete，
+// 其余方法不该被调用。
 type fakeProvider struct {
-	mu        sync.Mutex
-	createErr map[string]error             // 按名称注入创建失败
-	getSeq    map[string][]provider.Server // 按 ID 依次返回的 Get 序列
-	creates   []provider.CreateRequest
+	mu           sync.Mutex
+	createErr    map[string]error             // 按名称注入创建失败
+	getSeq       map[string][]provider.Server // 按 ID 依次返回的 Get 序列
+	creates      []provider.CreateRequest
+	powerCalls   []string // "id:action"
+	actionStatus []string // ActionStatus 依次返回；耗尽后停驻最后一个
+	statusIdx    int
+	deletes      []string
+	rebuilds     []string // "id@image"
+	resizes      []string // "id@size disk=bool"
 }
 
 func (f *fakeProvider) Create(_ context.Context, req provider.CreateRequest) (provider.Server, error) {
@@ -44,12 +52,43 @@ func (f *fakeProvider) Get(_ context.Context, id string) (provider.Server, error
 func (f *fakeProvider) List(context.Context) ([]provider.Server, error) {
 	return nil, errors.New("unexpected")
 }
-func (f *fakeProvider) Delete(context.Context, string) error { return errors.New("unexpected") }
-func (f *fakeProvider) Power(context.Context, string, string) (provider.ActionRef, error) {
-	return provider.ActionRef{}, errors.New("unexpected")
+func (f *fakeProvider) Delete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes = append(f.deletes, id)
+	return nil
 }
-func (f *fakeProvider) ActionStatus(context.Context, provider.ActionRef) (string, error) {
-	return "", errors.New("unexpected")
+func (f *fakeProvider) Power(_ context.Context, id, action string) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.powerCalls = append(f.powerCalls, id+":"+action)
+	return provider.ActionRef{ID: "act-" + id}, nil
+}
+func (f *fakeProvider) ActionStatus(_ context.Context, _ provider.ActionRef) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.actionStatus) == 0 {
+		return "completed", nil
+	}
+	s := f.actionStatus[f.statusIdx]
+	if f.statusIdx < len(f.actionStatus)-1 {
+		f.statusIdx++
+	}
+	return s, nil
+}
+
+func (f *fakeProvider) Rebuild(_ context.Context, id, image string) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rebuilds = append(f.rebuilds, id+"@"+image)
+	return provider.ActionRef{ID: "reb-" + id}, nil
+}
+
+func (f *fakeProvider) Resize(_ context.Context, id, size string, disk bool) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizes = append(f.resizes, fmt.Sprintf("%s@%s disk=%v", id, size, disk))
+	return provider.ActionRef{ID: "rsz-" + id}, nil
 }
 func (f *fakeProvider) SSHKeys(context.Context) ([]provider.SSHKey, error) {
 	return nil, errors.New("unexpected")

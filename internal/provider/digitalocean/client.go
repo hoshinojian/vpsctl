@@ -286,12 +286,7 @@ func (c *Client) Power(ctx context.Context, id, action string) (provider.ActionR
 	default:
 		return provider.ActionRef{}, fmt.Errorf("digitalocean: 不支持的动作 %q", action)
 	}
-	path := "/droplets/" + url.PathEscape(id) + "/actions"
-	var pg actionPage
-	if err := c.do(ctx, http.MethodPost, path, map[string]string{"type": action}, &pg); err != nil {
-		return provider.ActionRef{}, err
-	}
-	return provider.ActionRef{ID: strconv.Itoa(pg.Action.ID)}, nil
+	return c.postAction(ctx, id, map[string]any{"type": action})
 }
 
 func (c *Client) ActionStatus(ctx context.Context, ref provider.ActionRef) (string, error) {
@@ -300,6 +295,25 @@ func (c *Client) ActionStatus(ctx context.Context, ref provider.ActionRef) (stri
 		return "", err
 	}
 	return pg.Action.Status, nil
+}
+
+// Rebuild 用指定镜像重装（POST /droplets/{id}/actions type=rebuild）。
+func (c *Client) Rebuild(ctx context.Context, id, image string) (provider.ActionRef, error) {
+	return c.postAction(ctx, id, map[string]any{"type": "rebuild", "image": image})
+}
+
+// Resize 变更套餐（type=resize）；DO 要求节点已关机，disk=true 同时扩磁盘。
+func (c *Client) Resize(ctx context.Context, id, size string, resizeDisk bool) (provider.ActionRef, error) {
+	return c.postAction(ctx, id, map[string]any{"type": "resize", "size": size, "disk": resizeDisk})
+}
+
+func (c *Client) postAction(ctx context.Context, id string, body map[string]any) (provider.ActionRef, error) {
+	path := "/droplets/" + url.PathEscape(id) + "/actions"
+	var pg actionPage
+	if err := c.do(ctx, http.MethodPost, path, body, &pg); err != nil {
+		return provider.ActionRef{}, err
+	}
+	return provider.ActionRef{ID: strconv.Itoa(pg.Action.ID)}, nil
 }
 
 func (c *Client) SSHKeys(ctx context.Context) ([]provider.SSHKey, error) {

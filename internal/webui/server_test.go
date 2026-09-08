@@ -34,6 +34,8 @@ type fakeProvider struct {
 	sizes        []provider.Size
 	images       []provider.Image
 	keys         []provider.SSHKey
+	rebuilds     []string // "id@image"
+	resizes      []string // "id@size"
 }
 
 func (f *fakeProvider) Create(_ context.Context, req provider.CreateRequest) (provider.Server, error) {
@@ -124,6 +126,20 @@ func (f *fakeProvider) Images(context.Context) ([]provider.Image, error) {
 		return nil, errors.New("images failed")
 	}
 	return f.images, nil
+}
+
+func (f *fakeProvider) Rebuild(_ context.Context, id, image string) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rebuilds = append(f.rebuilds, id+"@"+image)
+	return provider.ActionRef{ID: "reb-" + id}, nil
+}
+
+func (f *fakeProvider) Resize(_ context.Context, id, size string, disk bool) (provider.ActionRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizes = append(f.resizes, id+"@"+size)
+	return provider.ActionRef{ID: "rsz-" + id}, nil
 }
 
 func testServer(t *testing.T, fps map[string]*fakeProvider) *httptest.Server {
@@ -644,4 +660,43 @@ func TestNMSPayload(t *testing.T) {
 		t.Errorf("未知账号应 400, got %d", resp2.StatusCode)
 	}
 	resp2.Body.Close()
+}
+
+func TestRebuildResizeEndpoints(t *testing.T) {
+	fp := &fakeProvider{servers: []provider.Server{{ID: "7", Account: "a1"}, {ID: "8", Account: "a1"}}}
+	srv := testServer(t, map[string]*fakeProvider{"a1": fp})
+
+	code, out := postJSON(t, srv.URL+"/api/rebuild", map[string]any{
+		"targets": []map[string]string{{"account": "a1", "id": "7"}}, "image": "ubuntu-24-04-x64",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("rebuild status = %d out=%v", code, out)
+	}
+	if len(fp.rebuilds) != 1 || fp.rebuilds[0] != "7@ubuntu-24-04-x64" {
+		t.Errorf("rebuilds = %v", fp.rebuilds)
+	}
+
+	code, out = postJSON(t, srv.URL+"/api/resize", map[string]any{
+		"targets": []map[string]string{{"account": "a1", "id": "8"}}, "size": "s-2vcpu-2gb", "resize_disk": true,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("resize status = %d out=%v", code, out)
+	}
+	if len(fp.resizes) != 1 || fp.resizes[0] != "8@s-2vcpu-2gb" {
+		t.Errorf("resizes = %v", fp.resizes)
+	}
+
+	// 校验失败路径
+	code, _ = postJSON(t, srv.URL+"/api/rebuild", map[string]any{"targets": []map[string]string{{"account": "a1", "id": "7"}}})
+	if code != http.StatusBadRequest {
+		t.Errorf("缺 image 应 400, got %d", code)
+	}
+	code, _ = postJSON(t, srv.URL+"/api/resize", map[string]any{"targets": []map[string]string{{"account": "a1", "id": "7"}}})
+	if code != http.StatusBadRequest {
+		t.Errorf("缺 size 应 400, got %d", code)
+	}
+	code, _ = postJSON(t, srv.URL+"/api/rebuild", map[string]any{"image": "img"})
+	if code != http.StatusBadRequest {
+		t.Errorf("空 targets 应 400, got %d", code)
+	}
 }

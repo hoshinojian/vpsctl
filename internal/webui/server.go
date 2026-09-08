@@ -3,7 +3,6 @@
 package webui
 
 import (
-	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -72,6 +71,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/create", s.handleCreate)
 	mux.HandleFunc("POST /api/power", s.handlePower)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
+	mux.HandleFunc("POST /api/rebuild", s.handleRebuild)
+	mux.HandleFunc("POST /api/resize", s.handleResize)
 	mux.HandleFunc("GET /api/accounts", s.handleAccounts)
 	mux.HandleFunc("POST /api/accounts", s.handleAddAccount)
 	mux.HandleFunc("GET /api/nms-payload", s.handleNMSPayload)
@@ -292,26 +293,16 @@ func (s *Server) handlePower(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "targets 为空")
 		return
 	}
-	results := make([]opResult, len(req.Targets))
-	_, byAccount, _ := s.snapshot()
-	var wg sync.WaitGroup
+	clients, _, _ := s.snapshot()
+	targets := make([]fleet.Target, len(req.Targets))
 	for i, t := range req.Targets {
-		wg.Add(1)
-		go func(i int, t target) {
-			defer wg.Done()
-			p, ok := byAccount[t.Account]
-			if !ok {
-				results[i] = opResult{Account: t.Account, ID: t.ID, Error: "未知账号"}
-				return
-			}
-			if _, err := p.Power(r.Context(), t.ID, req.Action); err != nil {
-				results[i] = opResult{Account: t.Account, ID: t.ID, Error: err.Error()}
-				return
-			}
-			results[i] = opResult{Account: t.Account, ID: t.ID, OK: true}
-		}(i, t)
+		targets[i] = fleet.Target{Account: t.Account, ID: t.ID}
 	}
-	wg.Wait()
+	res := fleet.PowerBatch(r.Context(), clients, targets, req.Action)
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
 	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
 }
 
@@ -329,61 +320,84 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "targets 为空")
 		return
 	}
-	results := make([]opResult, len(req.Targets))
-	_, byAccount, _ := s.snapshot()
-	var wg sync.WaitGroup
+	clients, _, _ := s.snapshot()
+	targets := make([]fleet.Target, len(req.Targets))
 	for i, t := range req.Targets {
-		wg.Add(1)
-		go func(i int, t target) {
-			defer wg.Done()
-			results[i] = s.deleteOne(r.Context(), byAccount, t, req.ShutdownFirst)
-		}(i, t)
+		targets[i] = fleet.Target{Account: t.Account, ID: t.ID}
 	}
-	wg.Wait()
+	res := fleet.DeleteBatch(r.Context(), clients, targets, fleet.DeleteOptions{
+		ShutdownFirst: req.ShutdownFirst,
+		Wait:          s.deleteWait,
+		Poll:          s.pollEvery,
+	})
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
 	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
 }
 
-// deleteOne 删除单台；shutdown_first 时先优雅关机并等待完成，
-// 未在时限内完成则不删（宁可漏删，不可误删）。
-func (s *Server) deleteOne(ctx context.Context, byAccount map[string]provider.Provider, t target, shutdownFirst bool) opResult {
-	fail := func(format string, args ...any) opResult {
-		return opResult{Account: t.Account, ID: t.ID, Error: fmt.Sprintf(format, args...)}
+// handleRebuild 重装选中节点（镜像必填，磁盘清空不可恢复）。
+func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Targets []target `json:"targets"`
+		Image   string   `json:"image"`
 	}
-	p, ok := byAccount[t.Account]
-	if !ok {
-		return fail("未知账号 %q", t.Account)
+	if !readJSON(w, r, &req) {
+		return
 	}
-	if shutdownFirst {
-		ref, err := p.Power(ctx, t.ID, provider.Shutdown)
-		if err != nil {
-			return fail("发起关机失败，未删除: %v", err)
-		}
-		deadline := time.Now().Add(s.deleteWait)
-		for {
-			status, err := p.ActionStatus(ctx, ref)
-			if err != nil {
-				return fail("查询关机状态失败，未删除: %v", err)
-			}
-			if status == "completed" {
-				break
-			}
-			if status == "errored" {
-				return fail("关机失败（provider 报 errored），未删除")
-			}
-			if time.Until(deadline) <= 0 {
-				return fail("关机超时（>%v），未删除", s.deleteWait)
-			}
-			select {
-			case <-ctx.Done():
-				return fail("已取消，未删除")
-			case <-time.After(s.pollEvery):
-			}
-		}
+	if req.Image == "" {
+		httpError(w, http.StatusBadRequest, "image 必填（重装会清空磁盘）")
+		return
 	}
-	if err := p.Delete(ctx, t.ID); err != nil {
-		return fail("删除失败: %v", err)
+	if len(req.Targets) == 0 {
+		httpError(w, http.StatusBadRequest, "targets 为空")
+		return
 	}
-	return opResult{Account: t.Account, ID: t.ID, OK: true}
+	clients, _, _ := s.snapshot()
+	targets := toFleetTargets(req.Targets)
+	res := fleet.RebuildBatch(r.Context(), clients, targets, req.Image, s.deleteWait, s.pollEvery)
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
+	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+// handleResize 改配选中节点（关机→改配→开机链由 fleet 编排）。
+func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Targets    []target `json:"targets"`
+		Size       string   `json:"size"`
+		ResizeDisk bool     `json:"resize_disk"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Size == "" {
+		httpError(w, http.StatusBadRequest, "size 必填")
+		return
+	}
+	if len(req.Targets) == 0 {
+		httpError(w, http.StatusBadRequest, "targets 为空")
+		return
+	}
+	clients, _, _ := s.snapshot()
+	targets := toFleetTargets(req.Targets)
+	res := fleet.ResizeBatch(r.Context(), clients, targets, req.Size, req.ResizeDisk, s.deleteWait, s.pollEvery)
+	results := make([]opResult, len(res))
+	for i, x := range res {
+		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
+	}
+	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+func toFleetTargets(ts []target) []fleet.Target {
+	out := make([]fleet.Target, len(ts))
+	for i, t := range ts {
+		out[i] = fleet.Target{Account: t.Account, ID: t.ID}
+	}
+	return out
 }
 
 // ---- 账号管理与 NMS 载荷导出 ----

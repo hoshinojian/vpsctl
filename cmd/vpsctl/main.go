@@ -13,6 +13,10 @@ const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean 先行）
 用法:
   vpsctl create [flags]             多账号批量创建节点，输出 JSON
   vpsctl list [flags]               节点清单（JSON；--format nms 导出 NMS 台账导入载荷）
+  vpsctl power [flags]              批量开关机（--tag/--ids 选目标）
+  vpsctl delete [flags]             批量删除（台数确认，宁可漏删不可误删）
+  vpsctl rebuild [flags]            批量重装（--image，磁盘清空不可恢复）
+  vpsctl resize [flags]             批量改配（--size，自动关机→改配→开机）
   vpsctl serve [flags]              本地 Web 管理台（查看/关机/开机/删除）
   vpsctl regions|sizes|images|keys  查询各账号可选值
 
@@ -36,6 +40,14 @@ func main() {
 		die(runCreate(os.Args[2:]))
 	case "list":
 		die(runNodeList(os.Args[2:]))
+	case "power":
+		die(runPower(os.Args[2:]))
+	case "delete":
+		die(runDelete(os.Args[2:]))
+	case "rebuild":
+		die(runRebuild(os.Args[2:]))
+	case "resize":
+		die(runResize(os.Args[2:]))
 	case "serve":
 		die(runServe(os.Args[2:]))
 	case "regions", "sizes", "images", "keys":

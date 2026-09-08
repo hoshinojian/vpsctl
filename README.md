@@ -98,6 +98,34 @@ curl -s -X POST http://<nms-host>:<port>/api/v1/topology -d @nms-nodes.json
   冗余字段（NMS 现载荷忽略，扩契约后直接可用）
 - **载荷含明文密码**：`--output` 文件按 600 权限写入，勿提交进任何仓库
 
+## 生命周期：`vpsctl power | delete`
+
+与 webui 共用同一套实现，防误删语义两端一致。目标二选一：`--tag`（如
+`batch:20260908T120000Z`）或 `--ids`（`account/id` 逗号分隔）；`--only` 限定账号范围：
+
+```sh
+vpsctl power --tag batch:20260908T120000Z --action off     # 批量关机（可逆，无确认）
+vpsctl delete --ids do-1/3164444 --confirm 1
+vpsctl delete --tag batch:20260908T120000Z --confirm 3 --shutdown-first
+```
+
+- `delete` 必须台数确认：`--confirm N` 与实际目标数一致才执行，不给则交互输入
+- `--shutdown-first`：先优雅关机并等待，未完成（超时 120s / errored）则该台**不删**——宁可漏删，不可误删
+- 任一账号节点查询失败时整体中止（破坏性操作宁可不动手）；结果逐台 JSON 输出，部分失败退出码 1
+
+## 维护：`vpsctl rebuild | resize`
+
+同样支持 `--tag/--ids/--only` 选目标 + 台数确认，webui 选中节点后的「重装…」「改配…」按钮同语义：
+
+```sh
+vpsctl rebuild --ids do-1/3164444 --image ubuntu-24-04-x64 --confirm 1   # 重装（磁盘清空，保留 ID/IP）
+vpsctl resize --tag batch:xxx --size s-2vcpu-2gb --confirm 3             # 改配（自动 关机→改配→开机）
+vpsctl resize --ids do-1/3164444 --size s-4vcpu-8gb --resize-disk --confirm 1  # 同时扩磁盘（不可逆）
+```
+
+- rebuild 数据清空不可恢复；resize 若节点已关机则跳过关机步骤，任一步失败即中止该台
+- 改配含两次电源动作，耗时较长（约 2-5 分钟），请耐心等待逐台结果
+
 ## 管理台：`vpsctl serve`
 
 ```sh
@@ -112,8 +140,9 @@ vpsctl serve --listen 127.0.0.1:9000
   （0600）并立即生效，无需重启 serve
 - **导出 NMS 载荷**：工具栏一键下载 04 §1.1 导入载荷（凭据取账号配置），等价于
   `list --format nms`；无公网 IP 的节点自动跳过并提示
-- 勾选后可 **关机 / 开机 / 删除**：
+- 勾选后可 **关机 / 开机 / 重装 / 改配 / 删除**：
   - **关机**：保留机器、继续计费、随时可再开机（可逆）
+  - **重装 / 改配**：与 CLI `rebuild`/`resize` 同语义，弹窗列明细并要求输入台数确认
   - **删除**：销毁磁盘、停止计费、**不可恢复**。弹窗列出明细与释放月费，需**手动输入台数**确认；服务端再校验请求数量一致
   - 删除可选「先优雅关机再删」：关机未完成（超时 120s / errored）则**不删**——宁可漏删，不可误删
 - **创建节点**：工具栏「创建节点…」弹窗里选定账号（以及区域/套餐/镜像/公钥），命名自动续号防重名，月费实时预估；提交后列表自动刷新可见 new → active
