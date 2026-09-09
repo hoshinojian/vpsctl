@@ -6,72 +6,136 @@
 <title>vpsctl 管理台</title>
 <style>
 :root {
-  --bg: #12151f; --panel: #1a1f2e; --line: #2a3147; --fg: #dfe4f2; --dim: #8a93ad;
-  --accent: #4f8cff; --danger: #e5484d; --warn: #eaa64d; --ok: #46c46f;
+  --bg: #0f1220; --panel: #161b2a; --panel2: #1c2233; --line: #262d40;
+  --fg: #e3e8f4; --dim: #8a93ad; --faint: #5c6478;
+  --accent: #4f8cff; --accent-dim: #2a4470; --danger: #e5484d; --warn: #eaa64d; --ok: #46c46f;
+  --radius: 10px; --shadow: 0 4px 18px rgba(0,0,0,.28);
 }
 * { box-sizing: border-box; }
+html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-header { display: flex; align-items: center; gap: 16px; padding: 14px 20px;
-  border-bottom: 1px solid var(--line); background: var(--panel); }
-h1 { font-size: 18px; margin: 0; }
-h1 .sub { color: var(--dim); font-size: 12px; font-weight: normal; margin-left: 6px; }
-#summary { color: var(--dim); flex: 1; }
-button { background: #242b40; color: var(--fg); border: 1px solid var(--line);
-  border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+a { color: var(--accent); }
+
+/* ---- 顶部:标题 + KPI 总览 ---- */
+header { display: flex; align-items: center; gap: 16px; padding: 16px 22px;
+  border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 20; }
+h1 { font-size: 17px; margin: 0; font-weight: 600; }
+h1 .sub { color: var(--dim); font-size: 12px; font-weight: normal; margin-left: 8px; }
+#summary { color: var(--dim); flex: 1; font-size: 13px; text-align: right; }
+
+kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 16px 22px 0; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
+.kpi .lab { color: var(--dim); font-size: 12px; }
+.kpi .val { font-size: 24px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.kpi .val.ok { color: var(--ok); }
+.kpi .sub { color: var(--faint); font-size: 12px; }
+
+/* ---- 视图切换 tab ---- */
+.views { display: flex; gap: 4px; margin: 14px 22px 0; }
+.tab { background: transparent; color: var(--dim); border: 1px solid transparent;
+  border-radius: 8px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+.tab:hover { color: var(--fg); }
+.tab.on { background: var(--panel2); color: var(--fg); border-color: var(--line); }
+.tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle; }
+.tab .dot.map { background: var(--accent); }
+.tab .dot.list { background: var(--ok); }
+
+/* ---- 过滤 ---- */
+.filters { display: flex; gap: 8px; padding: 12px 22px 0; flex-wrap: wrap; }
+.filters input, .filters select { background: var(--panel); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+.filters input:focus, .filters select:focus { border-color: var(--accent); outline: none; }
+.filters input { width: 220px; }
+.filters #f-tag { width: 180px; }
+
+/* ---- 工具栏 ---- */
+.toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 22px; flex-wrap: wrap; }
+#selinfo { color: var(--dim); margin-right: auto; font-size: 13px; }
+#last-refresh { color: var(--faint); font-size: 12px; margin-right: 12px; }
+
+/* ---- 按钮 ---- */
+button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; transition: background .12s, border-color .12s; }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .4; cursor: default; }
 button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.warn { background: var(--warn); border-color: var(--warn); color: #1c1608; }
 button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 12px 0; }
-.form-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 12px; }
-.form-grid select, .form-grid input { background: var(--bg); color: var(--fg);
-  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
-#cr-keys { max-height: 110px; overflow: auto; background: var(--bg);
-  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
-  font-size: 13px; margin-top: 4px; }
-#cr-keys .keyrow { display: block; margin: 2px 0; }
-.filters { display: flex; gap: 8px; padding: 12px 20px 0; flex-wrap: wrap; }
-.filters input, .filters select { background: var(--panel); color: var(--fg);
-  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
-.filters input { width: 220px; }
-.toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 20px; }
-#selinfo { color: var(--dim); margin-right: auto; }
-table { border-collapse: collapse; width: calc(100% - 40px); margin: 0 20px 30px; }
-th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { color: var(--dim); font-weight: normal; font-size: 12px; }
-tbody tr { cursor: pointer; }
-tbody tr:hover { background: #1c2233; }
-.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
-.status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+
+/* ---- 表格 ---- */
+#view-table { display: block; }
+#view-map { display: none; }
+.tablewrap { width: calc(100% - 44px); margin: 14px 22px 30px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--dim); font-weight: 500; font-size: 12px; background: var(--panel2); }
+thead th { position: sticky; top: 0; }
+tbody tr { cursor: pointer; transition: background .1s; }
+tbody tr:hover { background: var(--panel2); }
+tbody tr:last-child td { border-bottom: none; }
+tbody td { font-size: 13px; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+.status { display: inline-block; padding: 1px 9px; border-radius: 12px; font-size: 12px; font-weight: 500; }
 .status.active { background: #173a24; color: var(--ok); }
 .status.new { background: #16283f; color: var(--accent); }
 .status.off { background: #2b2f3d; color: var(--dim); }
 .status.other { background: #3d2f16; color: var(--warn); }
-.tag { display: inline-block; background: #232a3f; border-radius: 4px;
-  padding: 0 6px; margin-right: 4px; font-size: 12px; color: var(--dim); }
-#banner { display: none; margin: 0 20px 12px; padding: 10px 14px; border-radius: 6px;
+.tag { display: inline-block; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 5px; padding: 0 7px; margin-right: 4px; font-size: 11.5px; color: var(--dim); }
+.regcell .city { color: var(--fg); }
+.regcell .slug { color: var(--faint); font-size: 11.5px; margin-left: 5px; }
+.money { font-variant-numeric: tabular-nums; }
+
+/* ---- 提示条 / toast ---- */
+#banner { display: none; margin: 12px 22px 0; padding: 10px 14px; border-radius: 8px;
   background: #3a2225; color: #f2b8bb; white-space: pre-wrap; }
 #banner.show { display: block; }
-.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
-  display: flex; align-items: center; justify-content: center; }
+#toast { position: fixed; right: 20px; bottom: 20px; background: #173a24; color: var(--ok);
+  padding: 11px 18px; border-radius: 8px; opacity: 0; transition: opacity .3s; pointer-events: none;
+  box-shadow: var(--shadow); z-index: 50; }
+#toast.show { opacity: 1; }
+
+/* ---- 弹窗 ---- */
+.overlay { position: fixed; inset: 0; background: rgba(4,6,12,.6);
+  display: flex; align-items: center; justify-content: center; z-index: 30; }
 .overlay[hidden] { display: none; }
-.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  padding: 22px 26px; width: min(560px, 92vw); }
+.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px 26px; width: min(560px, 92vw); box-shadow: var(--shadow); }
 .modal h2 { margin: 0 0 10px; font-size: 16px; }
 .modal .dellist { max-height: 180px; overflow: auto; background: var(--bg);
-  border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin: 8px 0;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0;
   font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 .modal .cost { color: var(--warn); }
 .modal .opt { display: block; margin: 10px 0; }
 .modal input { background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-  border-radius: 6px; padding: 5px 8px; }
+  border-radius: 8px; padding: 6px 9px; font-size: 13px; }
+.modal input:focus { border-color: var(--accent); outline: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
-#toast { position: fixed; right: 20px; bottom: 20px; background: #173a24; color: var(--ok);
-  padding: 10px 16px; border-radius: 6px; opacity: 0; transition: opacity .3s; pointer-events: none; }
-#toast.show { opacity: 1; }
-.empty { color: var(--dim); text-align: center; padding: 30px 0; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 12px 0; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 12px; }
+.form-grid select, .form-grid input { background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; width: 100%; font-size: 13px; }
+#cr-keys { max-height: 110px; overflow: auto; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  font-size: 13px; margin-top: 4px; }
+#cr-keys .keyrow { display: block; margin: 2px 0; }
+
+.empty { color: var(--dim); text-align: center; padding: 36px 0; }
+
+/* ---- 地图占位（M3 填充） ---- */
+.mapwrap { width: calc(100% - 44px); margin: 14px 22px 30px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 30px;
+  display: flex; align-items: center; justify-content: center; min-height: 440px; }
+.mapwrap .hint { color: var(--dim); font-size: 14px; }
+
+@media (max-width: 860px) {
+  kpis { grid-template-columns: repeat(2, 1fr); }
+  #summary { display: none; }
+}
 </style>
 </head>
 <body>
@@ -80,6 +144,18 @@ tbody tr:hover { background: #1c2233; }
   <div id="summary">加载中…</div>
   <button id="refresh">刷新</button>
 </header>
+
+<kpis>
+  <div class="kpi"><span class="lab">账号</span><span class="val" id="kpi-accounts">–</span><span class="sub" id="kpi-accounts-sub">&nbsp;</span></div>
+  <div class="kpi"><span class="lab">节点总数</span><span class="val" id="kpi-total">–</span><span class="sub" id="kpi-total-sub">&nbsp;</span></div>
+  <div class="kpi"><span class="lab">运行中</span><span class="val ok" id="kpi-active">–</span><span class="sub" id="kpi-active-sub">&nbsp;</span></div>
+  <div class="kpi"><span class="lab">月费合计</span><span class="val" id="kpi-cost">–</span><span class="sub" id="kpi-cost-sub">&nbsp;</span></div>
+</kpis>
+
+<div class="views">
+  <button class="tab on" id="tab-map"><span class="dot map"></span>地图视图</button>
+  <button class="tab" id="tab-list"><span class="dot list"></span>列表视图</button>
+</div>
 
 <div class="filters">
   <input id="q" placeholder="搜索名称 / IP / 标签…">
@@ -91,11 +167,12 @@ tbody tr:hover { background: #1c2233; }
     <option value="new">new</option>
     <option value="off">off</option>
   </select>
-  <input id="f-tag" placeholder="标签过滤，如 batch:202609…" style="width:180px">
+  <input id="f-tag" placeholder="标签过滤，如 batch:202609…">
 </div>
 
 <div class="toolbar">
   <span id="selinfo">未选择</span>
+  <span id="last-refresh"></span>
   <button id="btn-create">创建节点…</button>
   <button id="btn-accounts">账号…</button>
   <button id="btn-ops">操作记录</button>
@@ -109,14 +186,22 @@ tbody tr:hover { background: #1c2233; }
 
 <div id="banner"></div>
 
-<table>
-  <thead><tr>
-    <th><input type="checkbox" id="selall"></th>
-    <th>名称</th><th>状态</th><th>区域</th><th>套餐</th><th>配置</th>
-    <th>公网 IPv4</th><th>月费</th><th>标签</th><th>账号</th>
-  </tr></thead>
-  <tbody id="rows"></tbody>
-</table>
+<div id="view-table">
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th><input type="checkbox" id="selall"></th>
+        <th>名称</th><th>状态</th><th>位置</th><th>套餐</th><th>配置</th>
+        <th>公网 IPv4</th><th>月费</th><th>标签</th><th>账号</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="view-map">
+  <div class="mapwrap"><span class="hint">地图视图将在下一版本加载（正在各区域标记节点位置）…</span></div>
+</div>
 
 <div class="overlay" id="modal-del" hidden>
   <div class="modal">
@@ -261,9 +346,17 @@ const $ = id => document.getElementById(id);
 let droplets = [], acctErrors = [];
 let allAccounts = [];        // 配置文件里的全部账号名（含 0 台的）
 const selected = new Set();  // "account/id"
+let accountInfo = {};        // account -> {ssh_user, has_password, provider}
 let toastTimer = null;
 
-const key = d => d.account + '/' + d.id;
+// region slug → 城市可读名（与数据库/API 的 region 保持一致，纯展示用）。
+const REGION_CITY = {
+  nyc1:'New York', nyc2:'New York', nyc3:'New York',
+  sfo1:'San Francisco', sfo2:'San Francisco', sfo3:'San Francisco',
+  ams2:'Amsterdam', ams3:'Amsterdam', lon1:'London', fra1:'Frankfurt',
+  blr1:'Bangalore', sgp1:'Singapore', syd1:'Sydney', tor1:'Toronto',
+};
+const cityName = slug => REGION_CITY[slug] || '';
 
 // fetchJSON 带超时的 JSON 请求：单接口挂起最多等 20s，不拖垮整页。
 function fetchJSON(url) {
@@ -323,34 +416,71 @@ function cell(text, cls) {
   return td;
 }
 
+function regionCell(slug) {
+  const td = document.createElement('td');
+  td.className = 'regcell';
+  const city = cityName(slug);
+  if (city) {
+    const c = document.createElement('span');
+    c.className = 'city'; c.textContent = city;
+    const sl = document.createElement('span');
+    sl.className = 'slug'; sl.textContent = slug;
+    td.append(c, sl);
+  } else {
+    td.textContent = slug || '—';
+  }
+  return td;
+}
+
 function statusCell(s) {
   const td = document.createElement('td');
   const sp = document.createElement('span');
-  sp.className = 'status ' + (['active', 'new', 'off'].includes(s) ? s : 'other');
+  const cls = (s === 'active' || s === 'new' || s === 'off' || s === 'running') ? s : 'other';
+  sp.className = 'status ' + (cls === 'running' ? 'active' : cls);
   sp.textContent = s;
   td.append(sp);
   return td;
 }
 
+function updateKpis(list) {
+  const total = droplets.length;
+  const active = droplets.filter(d => d.status === 'active' || d.status === 'running').length;
+  const cost = droplets.reduce((s, d) => s + (d.price_monthly || 0), 0);
+  const accounts = new Set(droplets.map(d => d.account)).size;
+  $('kpi-accounts').textContent = accounts;
+  $('kpi-total').textContent = total;
+  $('kpi-active').textContent = active;
+  $('kpi-cost').textContent = '$' + cost.toFixed(2);
+  $('kpi-total-sub').textContent = `显示 ${list.length} 台`;
+  $('kpi-active-sub').textContent = `闲置 ${total - active} 台`;
+  $('kpi-accounts-sub').textContent = `失败 ${acctErrors.length} 个`;
+  $('kpi-cost-sub').textContent = 'USD / 月';
+  $('summary').textContent = `${accountNames().length} 个账号 · ${total} 台节点 · 合计月费 $${cost.toFixed(2)}`
+    + (acctErrors.length ? ` · ${acctErrors.length} 个账号查询失败` : '');
+  $('last-refresh').textContent = '上次刷新 ' + new Date().toLocaleTimeString();
+}
+
+function accountNames() {
+  if (allAccounts.length) return allAccounts;
+  return [...new Set(droplets.map(d => d.account))];
+}
+
 function render() {
-  // 账号下拉：列出配置里的全部账号（含 0 台的），并标注台数
   const counts = {};
   droplets.forEach(d => counts[d.account] = (counts[d.account] || 0) + 1);
-  const accountNames = allAccounts.length ? allAccounts : [...new Set(droplets.map(d => d.account))];
+  const names = accountNames();
   const asel = $('f-account'), acur = asel.value;
   asel.textContent = '';
   asel.append(new Option('全部账号', ''));
-  accountNames.slice().sort().forEach(a =>
+  names.slice().sort().forEach(a =>
     asel.append(new Option(`${a}（${counts[a] || 0} 台）`, a)));
-  asel.value = (acur === '' || accountNames.includes(acur)) ? acur : '';
+  asel.value = (acur === '' || names.includes(acur)) ? acur : '';
 
   fillSelect('f-region', [...new Set(droplets.map(d => d.region || ''))].filter(Boolean));
 
-  const total = droplets.reduce((s, d) => s + (d.price_monthly || 0), 0);
-  $('summary').textContent = `${accountNames.length} 个账号 · ${droplets.length} 台节点 · 合计月费 $${total.toFixed(2)}`
-    + (acctErrors.length ? ` · ${acctErrors.length} 个账号查询失败` : '');
-
   const list = filtered();
+  updateKpis(list);
+
   const rows = $('rows');
   rows.textContent = '';
   if (!list.length) {
@@ -371,11 +501,12 @@ function render() {
     tdCb.append(cb); tr.append(tdCb);
     tr.append(cell(d.name, 'mono'));
     tr.append(statusCell(d.status));
-    tr.append(cell(d.region));
+    tr.append(regionCell(d.region));
     tr.append(cell(d.size));
     tr.append(cell(d.vcpus ? `${d.vcpus}C/${(d.memory_mb / 1024).toFixed(1)}G` : '—'));
     tr.append(cell(d.ipv4_public, 'mono'));
-    tr.append(cell(d.price_monthly ? '$' + d.price_monthly.toFixed(2) : '—'));
+    const tdCost = cell(d.price_monthly ? '$' + d.price_monthly.toFixed(2) : '—', 'money');
+    tr.append(tdCost);
     const tdTags = document.createElement('td');
     for (const t of d.tags || []) {
       const s = document.createElement('span'); s.className = 'tag'; s.textContent = t; tdTags.append(s);
@@ -478,6 +609,18 @@ $('del-confirm').onclick = async () => {
   selected.clear();
   render();
 };
+
+/* ---- 视图切换（M3 填充地图内容） ---- */
+function setView(v) {
+  document.body.dataset.view = v;
+  $('view-table').style.display = v === 'list' ? 'block' : 'none';
+  $('view-map').style.display = v === 'map' ? 'block' : 'none';
+  $('tab-map').className = 'tab' + (v === 'map' ? ' on' : '');
+  $('tab-list').className = 'tab' + (v === 'list' ? ' on' : '');
+  if (v === 'map' && typeof renderMap === 'function') renderMap();
+}
+$('tab-map').onclick = () => setView('map');
+$('tab-list').onclick = () => setView('list');
 
 /* ---- 创建节点 ---- */
 let catalog = null;
@@ -624,8 +767,6 @@ $('btn-ops').onclick = async () => {
 $('ops-close').onclick = () => ($('modal-ops').hidden = true);
 
 /* ---- 节点详情 ---- */
-let accountInfo = {}; // account -> {ssh_user, has_password, provider}
-
 function dtItem(grid, k, v, mono = true) {
   const label = document.createElement('label');
   label.textContent = k;
@@ -865,6 +1006,8 @@ $('btn-nms').onclick = async () => {
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 
+/* ---- 初始 ---- */
+setView('list');
 </script>
 <!-- 独立脚本块：主脚本若有求值期异常，清单加载仍能独立运行 -->
 <script>
