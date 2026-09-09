@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -221,6 +222,40 @@ func TestIndexServed(t *testing.T) {
 	n, _ := resp.Body.Read(buf)
 	if !strings.Contains(string(buf[:n]), "<!doctype html>") {
 		t.Errorf("首页内容不对: %q", string(buf[:n]))
+	}
+}
+
+func TestIndexUIDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	alt := []byte("<!doctype html><html><body>dev-ui</body></html>")
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), alt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New([]fleet.AccountClient{}, &config.File{}, filepath.Join(dir, "accounts.json"))
+	s.SetUIDir(dir)
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "dev-ui") {
+		t.Errorf("磁盘 index 应优先于内嵌: %q", string(body))
+	}
+
+	// 目录里没有 index.html 时回退内嵌
+	s2 := New([]fleet.AccountClient{}, &config.File{}, filepath.Join(dir, "a.json"))
+	s2.SetUIDir(t.TempDir())
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv2.Close()
+	resp2, _ := http.Get(srv2.URL + "/")
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if !strings.Contains(string(body2), "<!doctype html>") {
+		t.Errorf("缺 index.html 应回退内嵌: %q", string(body2))
 	}
 }
 

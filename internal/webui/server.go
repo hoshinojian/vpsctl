@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,8 +40,17 @@ type Server struct {
 	pollEvery    time.Duration
 	probePort    int           // NMS 导出预检探测端口（默认 22；测试注入）
 	probeTimeout time.Duration // 单台探测超时
+	uiDir        string        // 非空时从磁盘读 index.html（开发热改；生产用内嵌）
 
 	opLog []opEntry // 操作历史环形日志（最新在前，cap maxOpLog）
+}
+
+// SetUIDir 指定备用的前端资源目录：serve 启动时读该目录的 index.html（若存在），
+// 便于开发时改前端样式免重编译；不设置则回退内嵌 indexHTML。
+func (s *Server) SetUIDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uiDir = dir
 }
 
 // maxOpLog 操作历史保留条数（内存态，serve 重启即清）。
@@ -119,6 +130,15 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		s.mu.RLock()
+		dir := s.uiDir
+		s.mu.RUnlock()
+		if dir != "" {
+			if b, err := os.ReadFile(filepath.Join(dir, "index.html")); err == nil {
+				_, _ = w.Write(b)
+				return
+			}
+		}
 		_, _ = w.Write(indexHTML)
 	})
 	return logMiddleware(mux)
