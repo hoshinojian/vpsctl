@@ -776,6 +776,7 @@ func toServerJSON(s provider.Server) fleet.ServerJSON {
 		PriceMonthly: s.PriceMonthly,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
+		Lat: s.Lat, Lng: s.Lng,
 	}
 }
 

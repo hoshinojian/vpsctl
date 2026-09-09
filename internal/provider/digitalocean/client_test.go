@@ -115,6 +115,28 @@ func TestListPagination(t *testing.T) {
 	}
 }
 
+func TestToServerGeoCoords(t *testing.T) {
+	// 已知区域 slug → 应填上坐标
+	known := testDroplet(1)
+	known.Region = region{Slug: "nyc3", Name: "New York 3", Available: true}
+	c := &Client{account: "acct-1"}
+	s := c.toServer(known)
+	if s.Lat == 0 || s.Lng == 0 {
+		t.Errorf("已知区域应填坐标, got lat=%v lng=%v", s.Lat, s.Lng)
+	}
+	if s.Lat != 40.71 || s.Lng != -74.01 {
+		t.Errorf("nyc3 坐标不符: lat=%v lng=%v", s.Lat, s.Lng)
+	}
+
+	// 未知 slug → 坐标零值，不报错
+	unknown := testDroplet(2)
+	unknown.Region = region{Slug: "mars1", Name: "Mars 1", Available: true}
+	s2 := c.toServer(unknown)
+	if s2.Lat != 0 || s2.Lng != 0 {
+		t.Errorf("未知区域坐标应为零, got lat=%v lng=%v", s2.Lat, s2.Lng)
+	}
+}
+
 func TestCreate(t *testing.T) {
 	var gotBody createBody
 	mux := http.NewServeMux()

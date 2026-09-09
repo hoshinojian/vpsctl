@@ -403,6 +403,23 @@ func (c *Client) Images(ctx context.Context) ([]provider.Image, error) {
 	return out, nil
 }
 
+// geoPoint 是数字海洋区域的粗略坐标（等距投影用，无需高精度）。
+type geoPoint struct{ lat, lng float64 }
+
+// regionGeo 覆盖全部 DO 区域 slug（含已退役的旧域）。DO API 不返回坐标，
+// 只能静态映射；未知 slug 缺省为 0，前端按"未定位"处理。
+var regionGeo = map[string]geoPoint{
+	"nyc1": {40.71, -74.01}, "nyc2": {40.71, -74.01}, "nyc3": {40.71, -74.01},
+	"sfo1": {37.77, -122.42}, "sfo2": {37.77, -122.42}, "sfo3": {37.77, -122.42},
+	"ams2": {52.37, 4.90}, "ams3": {52.37, 4.90},
+	"lon1": {51.51, -0.13},
+	"fra1": {50.11, 8.68},
+	"blr1": {12.97, 77.59},
+	"sgp1": {1.35, 103.82},
+	"syd1": {-33.87, 151.21},
+	"tor1": {43.65, -79.38},
+}
+
 func (c *Client) toServer(d droplet) provider.Server {
 	s := provider.Server{
 		ID:           strconv.Itoa(d.ID),
@@ -417,6 +434,9 @@ func (c *Client) toServer(d droplet) provider.Server {
 		DiskGB:       d.Disk,
 		PriceMonthly: d.Size.PriceMonthly,
 		Tags:         d.Tags,
+	}
+	if g, ok := regionGeo[d.Region.Slug]; ok {
+		s.Lat, s.Lng = g.lat, g.lng
 	}
 	if t, err := time.Parse(time.RFC3339, d.CreatedAt); err == nil {
 		s.CreatedAt = t
