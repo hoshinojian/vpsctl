@@ -386,6 +386,7 @@ const $ = id => document.getElementById(id);
 let droplets = [], acctErrors = [];
 let allAccounts = [];        // 配置文件里的全部账号名（含 0 台的）
 const selected = new Set();  // "account/id"
+const key = d => d.account + '/' + d.id;  // 节点唯一键（勾选状态与地图分组共用）
 let accountInfo = {};        // account -> {ssh_user, has_password, provider}
 let toastTimer = null;
 let pendingOps = false;      // 有节点处于 new/进行中 → 快轮询
