@@ -388,6 +388,8 @@ let allAccounts = [];        // 配置文件里的全部账号名（含 0 台的
 const selected = new Set();  // "account/id"
 let accountInfo = {};        // account -> {ssh_user, has_password, provider}
 let toastTimer = null;
+let pendingOps = false;      // 有节点处于 new/进行中 → 快轮询
+let pollTimer = null;
 
 // region slug → 城市可读名（与数据库/API 的 region 保持一致，纯展示用）。
 const REGION_CITY = {
@@ -408,9 +410,10 @@ function fetchJSON(url) {
 }
 
 async function load() {
-  const [drRes, catRes, acRes] = await Promise.allSettled([
+  // 轻量轮询只拉 droplets + accounts；catalog（regions/sizes/images/keys 全套）仅在
+  // 打开「创建节点」弹窗时由 openCreate 拉取，避免每 30s 拖一次重接口。
+  const [drRes, acRes] = await Promise.allSettled([
     fetchJSON('/api/droplets'),
-    fetchJSON('/api/catalog'),
     fetchJSON('/api/accounts'),
   ]);
   if (drRes.status === 'fulfilled') {
@@ -420,15 +423,14 @@ async function load() {
     banner('节点清单加载失败（见浏览器控制台与 serve 终端日志）: '
       + (drRes.reason && drRes.reason.message ? drRes.reason.message : drRes.reason), true);
   }
-  if (catRes.status === 'fulfilled' && catRes.value
-    && Array.isArray(catRes.value.accounts) && catRes.value.accounts.length)
-    allAccounts = catRes.value.accounts;
   if (acRes.status === 'fulfilled' && acRes.value && Array.isArray(acRes.value.accounts)) {
     accountInfo = {};
     acRes.value.accounts.forEach(a => (accountInfo[a.name] = a));
     if (acRes.value.accounts.length) allAccounts = acRes.value.accounts.map(a => a.name);
   }
+  pendingOps = droplets.some(d => d.status === 'new');
   render();
+  scheduleNext();
 }
 
 function filtered() {
@@ -595,6 +597,7 @@ async function postOp(url, body) {
     if (!fails.length) toast(`操作已提交，全部成功（${j.results.length} 台）`);
     else banner(`成功 ${j.results.length - fails.length} 台，失败 ${fails.length} 台：\n`
       + fails.map(f => `${f.account}/${f.id} ${f.error}`).join('\n'), true);
+    pendingOps = true; // 操作后进行中，进快轮询；完成态由下次 load 复位
   } catch (e) { banner('请求失败: ' + e, true); }
   await load();
 }
@@ -909,6 +912,7 @@ $('cr-submit').onclick = async () => {
     if (!fails.length) toast(`已提交创建 ${j.created.length} 台，列表稍后自动刷新可见`);
     else banner(`成功 ${j.created.length} 台，失败 ${fails.length} 台：\n`
       + fails.map(e => `${e.name}: ${e.error}`).join('\n'), true);
+    pendingOps = true; // 新节点进入 new，进快轮询
     await load();
   } catch (e) {
     $('cr-msg').textContent = '请求失败: ' + e;
@@ -1180,13 +1184,19 @@ $('btn-nms').onclick = async () => {
   } catch (e) { banner('导出失败: ' + e, true); }
 };
 
+/* ---- 自适应轮询 ----
+ * 空闲 30s；有节点处于 new/进行中（pendingOps）时切 5s 快轮询，
+ * 让长耗时操作（创建/重装/改配）能及时看到结果；弹窗打开时暂停。 */
+const POLL_IDLE = 30000, POLL_BUSY = 5000;
+function scheduleNext() {
+  clearTimeout(pollTimer);
+  const modalOpen = !($('modal-del').hidden && $('modal-acct').hidden && $('modal-ops').hidden && $('modal-create').hidden);
+  const delay = (pendingOps && !modalOpen) ? POLL_BUSY : POLL_IDLE;
+  pollTimer = setTimeout(() => { if (!modalOpen) load(); }, delay);
+}
 /* ---- 初始 ---- */
 setView('list');
-</script>
-<!-- 独立脚本块：主脚本若有求值期异常，清单加载仍能独立运行 -->
-<script>
 try { load(); } catch (e) { banner('初始化失败: ' + e, true); }
-setInterval(() => { if ($('modal-del').hidden && $('modal-acct').hidden && $('modal-ops').hidden) load(); }, 30000);
 </script>
 </body>
 </html>
