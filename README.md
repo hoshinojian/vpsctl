@@ -189,7 +189,8 @@ Vultr [govultr](https://github.com/vultr/govultr)（游标分页）、
 
 ```sh
 make build / lint / test   # gofmt + go vet；go test -race
-make hooks                 # 安装本地 pre-push 钩子：lint+test 全绿才许 push，且禁止直推 main
+make check-ui              # 前端冒烟：DOM 桩 + 固定载荷完整执行页面脚本（需 node；pre-push 自动跑）
+make hooks                 # 安装本地 pre-push 钩子：lint+test+check-ui 全绿才许 push，且禁止直推 main
 ```
 
 协作流程：feature 分支 → 本地检查全绿 → push → GitHub PR → 人审合并（**无云端 CI**）。
