@@ -141,6 +141,8 @@ type ServerJSON struct {
 	IPv4Private  string    `json:"ipv4_private,omitempty"`
 	Tags         []string  `json:"tags,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+	Lat          float64   `json:"lat,omitempty"` // 等距投影用，未知区域为 0
+	Lng          float64   `json:"lng,omitempty"`
 }
 
 // ErrorJSON 是结果 JSON 中的单条失败。
@@ -311,6 +313,7 @@ func ToServerJSON(s provider.Server) ServerJSON {
 		PriceMonthly: s.PriceMonthly,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
+		Lat: s.Lat, Lng: s.Lng,
 	}
 }
 

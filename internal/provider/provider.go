@@ -36,6 +36,10 @@ type Server struct {
 	IPv4Private  string  //
 	Tags         []string
 	CreatedAt    time.Time
+	// Lat/Lng 是节点所在地理坐标（等距投影用）。提供商 API 通常不直接返回，
+	// 由各实现在 toServer 里按 region slug 从静态映射表填写；未知 slug 为 0。
+	Lat float64
+	Lng float64
 }
 
 // CreateRequest 描述一次创建请求。
