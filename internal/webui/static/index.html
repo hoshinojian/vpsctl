@@ -126,11 +126,36 @@ tbody td { font-size: 13px; }
 
 .empty { color: var(--dim); text-align: center; padding: 36px 0; }
 
-/* ---- 地图占位（M3 填充） ---- */
+/* ---- 地图视图 ---- */
 .mapwrap { width: calc(100% - 44px); margin: 14px 22px 30px; background: var(--panel);
-  border: 1px solid var(--line); border-radius: var(--radius); padding: 30px;
-  display: flex; align-items: center; justify-content: center; min-height: 440px; }
-.mapwrap .hint { color: var(--dim); font-size: 14px; }
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px 8px;
+  position: relative; }
+.mapwrap .map-hint { color: var(--faint); font-size: 12px; margin: 2px 4px 10px; }
+.mapwrap svg { width: 100%; display: block; }
+.map-legend { position: absolute; top: 44px; right: 30px; display: flex; flex-direction: column;
+  gap: 5px; background: rgba(22,27,42,.9); border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 12px; font-size: 12px; color: var(--dim); z-index: 3; }
+.map-legend .lg { display: flex; align-items: center; gap: 7px; }
+.map-legend .dot { width: 9px; height: 9px; border-radius: 50%; }
+.marker-group { cursor: pointer; }
+.marker-halo { fill: transparent; stroke: none; }
+.marker-dot { stroke: var(--panel); stroke-width: 1.5px; }
+.marker-label { fill: var(--faint); font-size: 10px; pointer-events: none; }
+#map-tip { position: fixed; z-index: 60; pointer-events: none; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; font-size: 12px;
+  color: var(--fg); box-shadow: var(--shadow); display: none; }
+#map-tip .n { font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+#map-tip .r { color: var(--dim); }
+.map-caption { display: flex; gap: 18px; flex-wrap: wrap; color: var(--dim);
+  font-size: 12px; padding: 10px 4px 6px; }
+.map-caption b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.map-unloc { width: 100%; margin-top: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.map-unloc .u-title { color: var(--faint); font-size: 12px; margin-bottom: 6px; }
+.map-unloc .u-item { display: inline-block; margin: 0 10px 6px 0; padding: 3px 9px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px; cursor: pointer; color: var(--dim); }
+.map-unloc .u-item:hover { border-color: var(--accent); color: var(--fg); }
+@media (max-width: 860px) { .map-legend { display: none; } }
 
 @media (max-width: 860px) {
   kpis { grid-template-columns: repeat(2, 1fr); }
@@ -200,7 +225,21 @@ tbody td { font-size: 13px; }
 </div>
 
 <div id="view-map">
-  <div class="mapwrap"><span class="hint">地图视图将在下一版本加载（正在各区域标记节点位置）…</span></div>
+  <div class="mapwrap">
+    <div class="map-hint">地图视图：等距投影世界地图，圆点按节点实际位置分布，颜色区分状态；点击节点查看详情。</div>
+    <div id="map-svg"></div>
+    <div class="map-legend">
+      <div class="lg"><span class="dot" style="background:var(--ok)"></span>运行中 active</div>
+      <div class="lg"><span class="dot" style="background:var(--accent)"></span>创建中 new</div>
+      <div class="lg"><span class="dot" style="background:var(--dim)"></span>已关机 off</div>
+      <div class="lg"><span class="dot" style="background:var(--warn)"></span>其他 other</div>
+    </div>
+    <div class="map-caption" id="map-caption"></div>
+    <div class="map-unloc" id="map-unloc" style="display:none">
+      <div class="u-title">未定位（无坐标或区域未知）</div>
+      <div id="map-unloc-list"></div>
+    </div>
+  </div>
 </div>
 
 <div class="overlay" id="modal-del" hidden>
@@ -340,6 +379,7 @@ tbody td { font-size: 13px; }
 </div>
 
 <div id="toast"></div>
+<div id="map-tip"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -516,6 +556,7 @@ function render() {
     rows.append(tr);
   }
   $('selall').checked = list.length > 0 && list.every(d => selected.has(key(d)));
+  if (typeof renderMap === 'function') renderMap();
   updateBar(list);
 }
 
@@ -610,7 +651,7 @@ $('del-confirm').onclick = async () => {
   render();
 };
 
-/* ---- 视图切换（M3 填充地图内容） ---- */
+/* ---- 视图切换 ---- */
 function setView(v) {
   document.body.dataset.view = v;
   $('view-table').style.display = v === 'list' ? 'block' : 'none';
@@ -621,6 +662,139 @@ function setView(v) {
 }
 $('tab-map').onclick = () => setView('map');
 $('tab-list').onclick = () => setView('list');
+
+/* ---- 全球地图视图 ---- */
+const MAP_W = 1080, MAP_H = 540;                 // 等距投影，lon∈[-180,180]→x, lat∈[90,-90]→y
+const projX = lng => (lng + 180) / 360 * MAP_W;
+const projY = lat => (90 - lat) / 180 * MAP_H;
+
+// 简化版世界大陆轮廓（等距投影坐标，手工描点，非严格 GeoJSON）。
+const MAP_CONTINENTS = [
+  [[-159,64],[-130,52],[-124,40],[-115,30],[-97,20],[-82,12],[-80,25],[-70,45],[-90,58],[-110,70],[-140,71],[-159,64]],
+  [[-168,-1],[-160,-5],[-150,-10],[-145,-15],[-140,-20],[-150,-25],[-160,-20],[-168,-1]],
+  [[-60,35],[-65,18],[-70,5],[-75,-5],[-80,-18],[-70,-35],[-60,-55],[-50,-35],[-42,-22],[-35,-8],[-45,5],[-55,20],[-60,35]],
+  [[-75,70],[-60,60],[-50,50],[-20,65],[-10,70],[5,72],[25,70],[60,68],[90,70],[120,70],[160,62],[170,55],[160,45],[145,40],[120,40],[100,45],[80,50],[60,52],[40,48],[25,40],[15,35],[0,35],[-10,40],[-20,45],[-30,50],[-45,55],[-60,55],[-75,70]],
+  [[-10,-15],[0,-5],[15,-5],[25,-5],[35,0],[45,5],[50,15],[45,30],[40,10],[35,20],[30,30],[25,35],[15,40],[5,35],[-5,25],[-10,-15]],
+  [[35,-20],[45,-25],[55,-25],[60,-15],[50,-15],[40,-10],[35,-20]],
+  [[-50,0],[-40,-5],[-35,-10],[-40,-15],[-50,-10],[-50,0]],
+  [[115,-40],[125,-42],[135,-35],[140,-25],[150,-20],[155,-28],[150,-38],[140,-45],[125,-45],[115,-40]],
+  [[-5,5],[0,0],[10,0],[5,5],[-5,5]],
+  [[-175,-20],[-170,-15],[-165,-20],[-170,-30],[-175,-20]],
+];
+const MAP_GRID = (() => {
+  let s = '';
+  for (let lng = -150; lng <= 150; lng += 30) {
+    const x = projX(lng).toFixed(1);
+    s += `<line x1="${x}" y1="0" x2="${x}" y2="${MAP_H}" stroke="var(--line)" stroke-width=".5" opacity=".35"/>`;
+  }
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const y = projY(lat).toFixed(1);
+    s += `<line x1="0" y1="${y}" x2="${MAP_W}" y2="${y}" stroke="var(--line)" stroke-width=".5" opacity=".35"/>`;
+  }
+  return s;
+})();
+const MAP_OUTLINE = MAP_CONTINENTS.map(poly =>
+  `<polygon points="${poly.map(p => projX(p[0]).toFixed(1) + ',' + projY(p[1]).toFixed(1)).join(' ')}" ` +
+  `fill="#202942" stroke="#2f3a55" stroke-width="1" stroke-linejoin="round"/>`
+).join('');
+
+// 状态→颜色/量级（与表格 status 徽章一致）。
+const MAP_STATUS = { active: 'var(--ok)', running: 'var(--ok)', new: 'var(--accent)', off: 'var(--dim)' };
+const mapStatus = s => MAP_STATUS[s] || 'var(--warn)';
+
+let mapTimer = null;
+function renderMap() {
+  // 视图不可见时跳过，等切到地图再画
+  if ($('view-map').style.display === 'none') return;
+  const list = filtered();
+  const byKey = {};
+  list.forEach(d => { if (d.lat || d.lng) (byKey[d.lat + ',' + d.lng] = byKey[d.lat + ',' + d.lng] || []).push(d); });
+  const unloc = list.filter(d => !(d.lat || d.lng));
+
+  // 统计覆盖图例：聚合同坐标节点数
+  const caption = $('map-caption');
+  caption.textContent = '';
+  const group = (id, val, n) => {
+    const span = document.createElement('span');
+    const b = document.createElement('b');
+    b.textContent = String(n);
+    span.append(document.createTextNode(id + ' '), b);
+    caption.append(span);
+  };
+  const counts = { active: 0, new: 0, off: 0, other: 0 };
+  list.forEach(d => { const k = (d.status === 'active' || d.status === 'running') ? 'active'
+    : (d.status === 'new' || d.status === 'off') ? d.status : 'other'; counts[k]++; });
+  group('节点', list.length, list.length);
+  group('运行中', counts.active, counts.active);
+  group('创建中', counts.new, counts.new);
+  group('已关机', counts.off, counts.off);
+  group('其他', counts.other, counts.other);
+
+  // 未定位节点列表
+  const ul = $('map-unloc');
+  const ull = $('map-unloc-list');
+  ull.textContent = '';
+  if (unloc.length) {
+    ul.style.display = 'block';
+    unloc.forEach(d => {
+      const b = document.createElement('span');
+      b.className = 'u-item';
+      b.textContent = `${d.name} · ${d.region || '?'} · ${d.account}`;
+      b.onclick = () => openDetails(d);
+      ull.append(b);
+    });
+  } else ul.style.display = 'none';
+
+  // 渲染 SVG：背景坐标网格 + 大陆 + 节点标记
+  const svg = $('map-svg');
+  let dots = '';
+  Object.keys(byKey).forEach(k => {
+    const arr = byKey[k];
+    if (!arr.length) return;
+    const [lat, lng] = k.split(',').map(Number);
+    const cx = projX(((lng + 180) % 360) - 180).toFixed(1); // 越界经度回卷
+    const cy = projY(lat).toFixed(1);
+    const n = arr.length;
+    const color = mapStatus(arr[0].status);
+    dots += `<g class="marker-group" data-key="${k}">` +
+      `<circle class="marker-halo" cx="${cx}" cy="${cy}" r="14"/>` +
+      `<circle class="marker-dot" cx="${cx}" cy="${cy}" r="${n > 1 ? 8 : 6}" fill="${color}"/>` +
+      (n > 1 ? `<text class="marker-label" x="${cx}" y="${cy + 3}" text-anchor="middle">${n}</text>` : '') +
+      `</g>`;
+  });
+  svg.innerHTML = `<svg viewBox="0 0 ${MAP_W} ${MAP_H}" xmlns="http://www.w3.org/2000/svg" ` +
+    `role="img" aria-label="节点分布世界地图">` +
+    `<rect x="0" y="0" width="${MAP_W}" height="${MAP_H}" fill="var(--bg)" rx="8"/>` +
+    MAP_GRID + MAP_OUTLINE + dots + `</svg>`;
+
+  svg.querySelectorAll('.marker-group').forEach(g => {
+    const key = g.dataset.key;
+    const arr = byKey[key];
+    g.addEventListener('mouseenter', e => showTip(e, arr));
+    g.addEventListener('mousemove', moveTip);
+    g.addEventListener('mouseleave', hideTip);
+    g.addEventListener('click', () => openDetails(arr[0]));
+    g.addEventListener('dblclick', () => openDetails(arr[0]));
+  });
+}
+
+function showTip(e, arr) {
+  const tip = $('map-tip'), d = arr[0];
+  const multi = arr.length > 1 ? `（${arr.length} 台，点击查看其一）` : '';
+  tip.innerHTML = '';
+  const n = document.createElement('div'); n.className = 'n'; n.textContent = d.name;
+  const r = document.createElement('div'); r.className = 'r';
+  r.textContent = `${d.account} · ${d.status} · ${d.region || '?'} · ${d.ipv4_public || '无 IP'}${multi}`;
+  tip.append(n, r);
+  tip.style.display = 'block';
+  moveTip(e);
+}
+function moveTip(e) {
+  const tip = $('map-tip');
+  tip.style.left = (e.clientX + 14) + 'px';
+  tip.style.top = (e.clientY + 12) + 'px';
+}
+function hideTip() { $('map-tip').style.display = 'none'; }
 
 /* ---- 创建节点 ---- */
 let catalog = null;
