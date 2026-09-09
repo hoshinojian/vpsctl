@@ -21,4 +21,11 @@ go vet ./...
 echo "pre-push: go test..."
 go test ./...
 
+echo "pre-push: check-ui..."
+if command -v node >/dev/null 2>&1; then
+	node tools/check-ui.mjs
+else
+	echo "（未安装 node，跳过 check-ui）"
+fi
+
 echo "pre-push: 全部通过"
