@@ -401,7 +401,7 @@ func TestDeleteShutdownFirst(t *testing.T) {
 }
 
 func TestCreateEndpoint(t *testing.T) {
-	fp := &fakeProvider{servers: []provider.Server{{ID: "1", Name: "vps-team3-03"}}}
+	fp := &fakeProvider{servers: []provider.Server{{ID: "1", Name: "vps-team3-sgp1-03"}}}
 	srv := testServer(t, map[string]*fakeProvider{"team3": fp})
 
 	code, out := postJSON(t, srv.URL+"/api/create", map[string]any{
@@ -418,8 +418,8 @@ func TestCreateEndpoint(t *testing.T) {
 	}
 	names := []string{created[0].(map[string]any)["name"].(string), created[1].(map[string]any)["name"].(string)}
 	sort.Strings(names)
-	// 现有 vps-team3-03 → 自动从 04 续号
-	if names[0] != "vps-team3-04" || names[1] != "vps-team3-05" {
+	// 现有 vps-team3-sgp1-03 → 自动从 04 续号
+	if names[0] != "vps-team3-sgp1-04" || names[1] != "vps-team3-sgp1-05" {
 		t.Errorf("续号命名不符: %v", names)
 	}
 	fp.mu.Lock()

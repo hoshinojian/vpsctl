@@ -17,7 +17,7 @@ func runCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	accounts := fs.String("accounts", "", "账号配置路径（默认 ~/.config/vpsctl/accounts.json，或 $VPSCTL_ACCOUNTS）")
 	count := fs.Int("count", 1, "每个账号创建台数")
-	prefix := fs.String("name-prefix", "vps", "节点名前缀，命名 {prefix}-{account}-{NN}")
+	prefix := fs.String("name-prefix", "vps", "节点名前缀，命名 {prefix}-{account}-{region}-{NN}")
 	start := fs.Int("start-index", 1, "序号起始（跨批次避让重名）")
 	region := fs.String("region", "", "区域 slug，如 sgp1（必填）")
 	size := fs.String("size", "", "套餐 slug，如 s-1vcpu-1gb（必填）")

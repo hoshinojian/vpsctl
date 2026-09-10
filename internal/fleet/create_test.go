@@ -138,30 +138,43 @@ func TestSelectClients(t *testing.T) {
 
 func TestNextStartIndex(t *testing.T) {
 	servers := []provider.Server{
-		{Name: "vps-team3-01"}, {Name: "vps-team3-07"}, {Name: "other-01"},
+		{Name: "vps-team3-sgp1-01"}, {Name: "vps-team3-sgp1-07"}, {Name: "other-01"},
 	}
-	if got := NextStartIndex(servers, "vps", "team3"); got != 8 {
+	if got := NextStartIndex(servers, "vps", "team3", "sgp1"); got != 8 {
 		t.Errorf("NextStartIndex = %d, want 8", got)
 	}
-	if got := NextStartIndex(servers, "vps", "team4"); got != 1 {
+	if got := NextStartIndex(servers, "vps", "team3", "lon1"); got != 1 {
+		t.Errorf("同账号不同区域应为 1（跨区域不重名）, got %d", got)
+	}
+	if got := NextStartIndex(servers, "vps", "team4", "sgp1"); got != 1 {
 		t.Errorf("无同名前缀应为 1, got %d", got)
 	}
-	if got := NextStartIndex(nil, "vps", "team3"); got != 1 {
+	if got := NextStartIndex(nil, "vps", "team3", "sgp1"); got != 1 {
 		t.Errorf("空列表应为 1, got %d", got)
 	}
 }
 
 func TestNames(t *testing.T) {
-	got := Names("vps", "do-1", 1, 3)
-	want := []string{"vps-do-1-01", "vps-do-1-02", "vps-do-1-03"}
+	got := Names("vps", "do-1", "sgp1", 1, 3)
+	want := []string{"vps-do-1-sgp1-01", "vps-do-1-sgp1-02", "vps-do-1-sgp1-03"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("Names = %v, want %v", got, want)
 		}
 	}
-	got = Names("vps", "do-1", 12, 2)
-	if got[0] != "vps-do-1-12" || got[1] != "vps-do-1-13" {
+	got = Names("vps", "do-1", "sgp1", 12, 2)
+	if got[0] != "vps-do-1-sgp1-12" || got[1] != "vps-do-1-sgp1-13" {
 		t.Errorf("StartIndex 偏移不符: %v", got)
+	}
+	// P69 回归：同账号跨区域同 start-index 的名字必须互不相同。
+	a := Names("soak", "team3", "lon1", 1, 2)
+	b := Names("soak", "team3", "tor1", 1, 2)
+	seen := map[string]bool{}
+	for _, n := range append(append([]string{}, a...), b...) {
+		if seen[n] {
+			t.Fatalf("跨区域批次出现重名: %v + %v", a, b)
+		}
+		seen[n] = true
 	}
 }
 
@@ -179,7 +192,7 @@ func TestPlan(t *testing.T) {
 	if plan[0].Provider != "digitalocean" || plan[0].Count != 2 {
 		t.Errorf("entry = %+v", plan[0])
 	}
-	if plan[0].Names[0] != "vps-a1-01" || plan[1].Names[1] != "vps-a2-02" {
+	if plan[0].Names[0] != "vps-a1-sgp1-01" || plan[1].Names[1] != "vps-a2-sgp1-02" {
 		t.Errorf("计划命名不符: %+v", plan)
 	}
 }
@@ -219,11 +232,11 @@ func TestCreateSuccess(t *testing.T) {
 		t.Errorf("requested = %+v", res.Requested)
 	}
 	// 排序后前两条是 a1
-	if res.Created[0].Name != "vps-a1-01" || res.Created[1].Name != "vps-a1-02" ||
-		res.Created[2].Name != "vps-a2-01" {
+	if res.Created[0].Name != "vps-a1-sgp1-01" || res.Created[1].Name != "vps-a1-sgp1-02" ||
+		res.Created[2].Name != "vps-a2-sgp1-01" {
 		t.Errorf("命名/排序不符: %+v", res.Created)
 	}
-	if res.Created[0].ID != "id-vps-a1-01" {
+	if res.Created[0].ID != "id-vps-a1-sgp1-01" {
 		t.Errorf("ID 不符: %+v", res.Created[0])
 	}
 }
@@ -253,30 +266,30 @@ func TestCreateTagsAndRequest(t *testing.T) {
 }
 
 func TestCreatePartialFailure(t *testing.T) {
-	fp := &fakeProvider{createErr: map[string]error{"vps-a1-02": errors.New("429 rate limited")}}
+	fp := &fakeProvider{createErr: map[string]error{"vps-a1-sgp1-02": errors.New("429 rate limited")}}
 	o := opts(AccountClient{Name: "a1", Provider: fp})
 
 	res, err := Create(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Created) != 1 || res.Created[0].Name != "vps-a1-01" {
+	if len(res.Created) != 1 || res.Created[0].Name != "vps-a1-sgp1-01" {
 		t.Errorf("created = %+v", res.Created)
 	}
 	if len(res.Errors) != 1 {
 		t.Fatalf("errors = %+v", res.Errors)
 	}
 	e := res.Errors[0]
-	if e.Account != "a1" || e.Name != "vps-a1-02" || e.Index != 2 || !strings.Contains(e.Error, "429") {
+	if e.Account != "a1" || e.Name != "vps-a1-sgp1-02" || e.Index != 2 || !strings.Contains(e.Error, "429") {
 		t.Errorf("error 条目不符: %+v", e)
 	}
 }
 
 func TestCreateWaitActive(t *testing.T) {
 	fp := &fakeProvider{getSeq: map[string][]provider.Server{
-		"id-vps-a1-01": {
-			{ID: "id-vps-a1-01", Name: "vps-a1-01", Status: "new"},
-			{ID: "id-vps-a1-01", Name: "vps-a1-01", Status: "active", IPv4Public: "203.0.113.9"},
+		"id-vps-a1-sgp1-01": {
+			{ID: "id-vps-a1-sgp1-01", Name: "vps-a1-sgp1-01", Status: "new"},
+			{ID: "id-vps-a1-sgp1-01", Name: "vps-a1-sgp1-01", Status: "active", IPv4Public: "203.0.113.9"},
 		},
 	}}
 	o := opts(AccountClient{Name: "a1", Provider: fp})
@@ -299,10 +312,10 @@ func TestCreateWaitActive(t *testing.T) {
 
 func TestCreateWaitTimeoutKeepsNode(t *testing.T) {
 	fp := &fakeProvider{getSeq: map[string][]provider.Server{
-		"id-vps-a1-01": {
-			{ID: "id-vps-a1-01", Name: "vps-a1-01", Status: "new"},
-			{ID: "id-vps-a1-01", Name: "vps-a1-01", Status: "new"},
-			{ID: "id-vps-a1-01", Name: "vps-a1-01", Status: "new"},
+		"id-vps-a1-sgp1-01": {
+			{ID: "id-vps-a1-sgp1-01", Name: "vps-a1-sgp1-01", Status: "new"},
+			{ID: "id-vps-a1-sgp1-01", Name: "vps-a1-sgp1-01", Status: "new"},
+			{ID: "id-vps-a1-sgp1-01", Name: "vps-a1-sgp1-01", Status: "new"},
 		},
 	}}
 	o := opts(AccountClient{Name: "a1", Provider: fp})
