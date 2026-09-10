@@ -58,7 +58,7 @@ vpsctl create \
 | --- | --- |
 | `--count N` | 每个账号创建台数 |
 | `--only team3` | 逗号分隔的账号名，**只在指定账号上创建**（默认全部账号） |
-| `--name-prefix` | 命名前缀，最终名 `{prefix}-{account}-{NN}`（如 `vps-do-1-01`） |
+| `--name-prefix` | 命名前缀，最终名 `{prefix}-{account}-{region}-{NN}`（如 `vps-do-1-sgp1-01`；region 进名保证跨区域批次不重名，P69） |
 | `--start-index N` | 序号起始，跨批次避让重名 |
 | `--region/--size/--image` | 必填，slug 可先用 `regions`/`sizes`/`images` 子命令查询 |
 | `--ssh-keys` | 逗号分隔，支持 ID / 指纹 / 名称混填（名称自动解析） |
@@ -76,7 +76,7 @@ vpsctl create \
   "batch": "20260904T153000Z",
   "requested": { "do-1": 3, "do-2": 3 },
   "created": [
-    { "account": "do-1", "id": "3164444", "name": "vps-do-1-01", "status": "active",
+    { "account": "do-1", "id": "3164444", "name": "vps-do-1-sgp1-01", "status": "active",
       "region": "sgp1", "size": "s-1vcpu-1gb", "ipv4_public": "203.0.113.10",
       "price_monthly": 6, "tags": ["batch:20260904T153000Z"], "created_at": "…" }
   ],

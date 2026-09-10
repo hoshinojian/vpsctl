@@ -233,7 +233,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	start := 1
 	if servers, err := clients[0].Provider.List(r.Context()); err == nil {
-		start = fleet.NextStartIndex(servers, req.Prefix, req.Account)
+		start = fleet.NextStartIndex(servers, req.Prefix, req.Account, req.Region)
 	}
 	res, err := fleet.Create(r.Context(), fleet.Options{
 		Clients: clients, Count: req.Count, Prefix: req.Prefix, StartIndex: start,

@@ -81,9 +81,9 @@ func SelectClients(clients []AccountClient, only []string) ([]AccountClient, err
 }
 
 // NextStartIndex 返回避免与现有节点重名的下一个序号：
-// 扫描名为 {prefix}-{account}-{NN} 的最大 NN + 1；无匹配时为 1。
-func NextStartIndex(servers []provider.Server, prefix, account string) int {
-	re, err := regexp.Compile("^" + regexp.QuoteMeta(prefix) + "-" + regexp.QuoteMeta(account) + "-(\\d+)$")
+// 扫描名为 {prefix}-{account}-{region}-{NN} 的最大 NN + 1；无匹配时为 1。
+func NextStartIndex(servers []provider.Server, prefix, account, region string) int {
+	re, err := regexp.Compile("^" + regexp.QuoteMeta(prefix) + "-" + regexp.QuoteMeta(account) + "-" + regexp.QuoteMeta(region) + "-(\\d+)$")
 	if err != nil {
 		return 1
 	}
@@ -98,11 +98,13 @@ func NextStartIndex(servers []provider.Server, prefix, account string) int {
 	return max + 1
 }
 
-// Names 生成单账号的节点名序列：{prefix}-{account}-{NN}。
-func Names(prefix, account string, start, count int) []string {
+// Names 生成单账号的节点名序列：{prefix}-{account}-{region}-{NN}。
+// region 进名是为了跨区域批次天然不重名——NMS 以名字作节点 id，同账号
+// 跨区域同名会导致载荷重复 id 被整单拒绝（NMS2 pitfalls P69）。
+func Names(prefix, account, region string, start, count int) []string {
 	names := make([]string, 0, count)
 	for i := 0; i < count; i++ {
-		names = append(names, fmt.Sprintf("%s-%s-%02d", prefix, account, start+i))
+		names = append(names, fmt.Sprintf("%s-%s-%s-%02d", prefix, account, region, start+i))
 	}
 	return names
 }
@@ -118,7 +120,7 @@ func Plan(o Options) ([]PlanEntry, error) {
 			Account:  ac.Name,
 			Provider: ac.ProviderName,
 			Count:    o.Count,
-			Names:    Names(o.Prefix, ac.Name, o.startIndex(), o.Count),
+			Names:    Names(o.Prefix, ac.Name, o.Region, o.startIndex(), o.Count),
 		})
 	}
 	return entries, nil
@@ -212,7 +214,7 @@ type acctOut struct {
 
 func createAccount(ctx context.Context, o Options, ac AccountClient, batch string) acctOut {
 	out := acctOut{}
-	names := Names(o.Prefix, ac.Name, o.startIndex(), o.Count)
+	names := Names(o.Prefix, ac.Name, o.Region, o.startIndex(), o.Count)
 	sem := make(chan struct{}, o.concurrency())
 	var mu sync.Mutex
 	var wg sync.WaitGroup
