@@ -115,6 +115,23 @@ func Plan(o Options) ([]PlanEntry, error) {
 		return nil, err
 	}
 	entries := make([]PlanEntry, 0, len(o.Clients))
+	// P75：user-data 按**字节**拦截非 ASCII（DO 链路 latin-1 roundtrip 二次编码
+	// 产生控制字符毁掉 cloud-init；合法 UTF-8 照样中招）。覆盖两条路，开工前全预检。
+	precheck := func() error {
+		userData := o.UserData
+		for _, ac := range o.Clients {
+			if ud, ok := o.UserDataByAccount[ac.Name]; ok {
+				userData = ud
+			}
+			if err := checkASCII(userData, ac.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := precheck(); err != nil {
+		return nil, err
+	}
 	for _, ac := range o.Clients {
 		entries = append(entries, PlanEntry{
 			Account:  ac.Name,
@@ -354,4 +371,16 @@ func (o Options) pollEvery() time.Duration {
 		return 5 * time.Second
 	}
 	return o.PollEvery
+}
+
+// checkASCII user-data 按**字节**拦截非 ASCII（P75：DO 链路对非 ASCII 字节做
+// latin-1 roundtrip 二次编码，产生控制字符毁掉 cloud-init/YAML；合法 UTF-8 照样
+// 中招——utf8.Valid 拦不住，必须按字节）。覆盖 UserData 与 UserDataByAccount 两条路。
+func checkASCII(userData, account string) error {
+	for i := 0; i < len(userData); i++ {
+		if userData[i] > 0x7F {
+			return fmt.Errorf("账号 %s 的 user-data 含非 ASCII 字节（offset %d）——P75：DO 链路会二次编码产生控制字符毁掉 cloud-init；请 ASCII 化内容或用 base64 包装", account, i)
+		}
+	}
+	return nil
 }
