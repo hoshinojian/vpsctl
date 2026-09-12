@@ -28,6 +28,7 @@ func runCreate(args []string) error {
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
 	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
+	allowBare := fs.Bool("allow-bare", false, "放行「无密码且无 user-data/ssh-keys」的裸机创建（缺省 fail-fast，防 P81 裸机交付）")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -67,7 +68,7 @@ func runCreate(args []string) error {
 		}
 		opts.UserData = string(b)
 	}
-	if err := injectPasswords(cfg, clients, *userData, &opts); err != nil {
+	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *allowBare, &opts); err != nil {
 		return err
 	}
 
@@ -101,14 +102,22 @@ func runCreate(args []string) error {
 // injectPasswords 把选中账号配置的 ssh_password 生成为账号专属 cloud-init
 // （设密码 + 开 SSH 密码登录）。与 --user-data 互斥：零依赖没有 YAML 合并
 // 能力，两者同给宁可报错，避免密码悄悄不生效。
-func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, opts *fleet.Options) error {
+//
+// V1 防呆（92 台轮 P81 裸机交付——无密码账号 + 不传 user-data/ssh-keys = 机器无法
+// SSH 管理，探针负事实升级后拉黑死锁）：账号无 ssh_password ∧ 无 --user-data ∧
+// 无 --ssh-keys 时缺省 fail-fast；--allow-bare 显式放行（降级为 stderr 警告留痕）。
+func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, allowBare bool, opts *fleet.Options) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
 	}
+	var bare []string
 	for _, c := range clients {
 		a := byName[c.Name]
 		if a.SSHPassword == "" {
+			if userDataPath == "" && len(sshKeys) == 0 {
+				bare = append(bare, c.Name)
+			}
 			continue
 		}
 		if userDataPath != "" {
@@ -122,6 +131,13 @@ func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPa
 			opts.UserDataByAccount = map[string]string{}
 		}
 		opts.UserDataByAccount[c.Name] = ud
+	}
+	if len(bare) > 0 {
+		msg := fmt.Sprintf("账号 %v 无 ssh_password 且未提供 --user-data/--ssh-keys：机器将无法通过密码/密钥 SSH 管理", bare)
+		if !allowBare {
+			return fmt.Errorf("%s——确认要裸机创建请加 --allow-bare", msg)
+		}
+		fmt.Fprintf(os.Stderr, "警告：%s（--allow-bare 放行）\n", msg)
 	}
 	return nil
 }
