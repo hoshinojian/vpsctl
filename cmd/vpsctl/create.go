@@ -18,7 +18,7 @@ func runCreate(args []string) error {
 	accounts := fs.String("accounts", "", "账号配置路径（默认 ~/.config/vpsctl/accounts.json，或 $VPSCTL_ACCOUNTS）")
 	count := fs.Int("count", 1, "每个账号创建台数")
 	prefix := fs.String("name-prefix", "vps", "节点名前缀，命名 {prefix}-{account}-{region}-{NN}")
-	start := fs.Int("start-index", 1, "序号起始（跨批次避让重名）")
+	start := fs.Int("start-index", 1, "序号起始（显式给出即按它起号，覆盖语义不盘点；缺省盘点各选中账号现有节点自动避让续号）")
 	region := fs.String("region", "", "区域 slug，如 sgp1（必填）")
 	size := fs.String("size", "", "套餐 slug，如 s-1vcpu-1gb（必填）")
 	image := fs.String("image", "", "镜像 slug，如 ubuntu-24-04-x64（必填）")
@@ -48,11 +48,18 @@ func runCreate(args []string) error {
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	startIdx, err := resolveStartIndex(ctx, clients, fs, *start, *prefix, *region)
+	if err != nil {
+		return err
+	}
+
 	opts := fleet.Options{
 		Clients:     clients,
 		Count:       *count,
 		Prefix:      *prefix,
-		StartIndex:  *start,
+		StartIndex:  startIdx,
 		Region:      *region,
 		Size:        *size,
 		Image:       *image,
@@ -84,8 +91,6 @@ func runCreate(args []string) error {
 		}, *output)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	res, err := fleet.Create(ctx, opts)
 	if err != nil {
 		return err
@@ -97,6 +102,37 @@ func runCreate(args []string) error {
 		return fmt.Errorf("%d 台创建失败（部分节点可能已创建，详见上方 JSON）", len(res.Errors))
 	}
 	return nil
+}
+
+// resolveStartIndex 决定 create 的起始序号。用户显式给了 -start-index 则原样
+// 返回（覆盖语义，完全不盘点）；未显式给时对各选中账号盘点现有节点，取各账号
+// NextStartIndex 的 max 作全局起始——名字含 account 本不跨账号碰撞，避让的是
+// 同账号批间序号空洞。任一账号 List 失败即 fail-fast：学 webui 的静默回退会在
+// 既有节点上重名，NMS 以名字作节点 id 会整单拒绝。
+func resolveStartIndex(ctx context.Context, clients []fleet.AccountClient, fs *flag.FlagSet, explicit int, prefix, region string) (int, error) {
+	explicitSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "start-index" {
+			explicitSet = true
+		}
+	})
+	if explicitSet {
+		return explicit, nil
+	}
+	if prefix == "" || region == "" {
+		return 1, nil // 缺前缀/区域的参数错误交给 Options.validate，别白打 API
+	}
+	start := 1
+	for _, c := range clients {
+		servers, err := c.Provider.List(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("账号 %s 盘点现有节点失败（自动避让要求全部账号可查询；也可显式传 -start-index 跳过盘点）: %w", c.Name, err)
+		}
+		if n := fleet.NextStartIndex(servers, prefix, c.Name, region); n > start {
+			start = n
+		}
+	}
+	return start, nil
 }
 
 // injectPasswords 把选中账号配置的 ssh_password 生成为账号专属 cloud-init
