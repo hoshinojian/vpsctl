@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/fleet"
 	"github.com/hoshinojian/vpsctl/internal/provider"
@@ -77,6 +78,7 @@ func runDelete(args []string) error {
 	ids := fs.String("ids", "", "按 account/id 精确选目标，逗号分隔")
 	confirm := fs.Int("confirm", 0, "目标台数确认（与所选台数一致才执行；不给则交互输入）")
 	shutdownFirst := fs.Bool("shutdown-first", false, "先优雅关机，关机未完成则不删（宁可漏删）")
+	waitGone := fs.Duration("wait-gone", 0, "删除发起后轮询等待目标从 list 消失，如 120s（DO 删除为异步，返回后 list 可能短暂仍见实例）；缺省 0 不等待")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -111,7 +113,35 @@ func runDelete(args []string) error {
 	if err := printJSON(res, *output); err != nil {
 		return err
 	}
+	if *waitGone > 0 {
+		if err := waitGoneUntilGone(ctx, clients, res, *waitGone); err != nil {
+			return err
+		}
+	}
 	return failOnOpErrors(res)
+}
+
+// okTargets 取删除结果中成功的台作为等待集——失败台永不消失，纳入等待集
+// 只会白耗超时。
+func okTargets(res []fleet.OpResult) []fleet.Target {
+	var out []fleet.Target
+	for _, r := range res {
+		if r.OK {
+			out = append(out, fleet.Target{Account: r.Account, ID: r.ID})
+		}
+	}
+	return out
+}
+
+// waitGoneUntilGone 对删除结果 OK 的台轮询等待其从 list 消失（Ctrl-C 取消）；
+// 超时错误含未消失清单，经 main 落 stderr 并非零退出。
+func waitGoneUntilGone(ctx context.Context, clients []fleet.AccountClient, res []fleet.OpResult, timeout time.Duration) error {
+	targets := okTargets(res)
+	if len(targets) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "等待 %d 台从 list 消失（--wait-gone %s，Ctrl-C 取消）…\n", len(targets), timeout)
+	return fleet.WaitGone(ctx, clients, targets, fleet.WaitGoneOptions{Timeout: timeout})
 }
 
 func runPower(args []string) error {

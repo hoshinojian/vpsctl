@@ -4,7 +4,10 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -170,4 +173,125 @@ func gracefulShutdownWait(ctx context.Context, p provider.Provider, id string, w
 		case <-time.After(poll):
 		}
 	}
+}
+
+// waitGoneMinPoll 是等待消失的轮询间隔下限：DO 删除为异步、list 最终一致，
+// 间隔太短会把一致性抖动误判成超时。
+const waitGoneMinPoll = 5 * time.Second
+
+// WaitGoneOptions 描述"等待删除目标从 list 消失"的参数。
+type WaitGoneOptions struct {
+	Timeout time.Duration // 总等待上限（必填 >0）
+	Poll    time.Duration // 轮询间隔，低于 5s 收敛到 5s（DO 最终一致性）
+	// Now/Sleep 供测试注入假时钟；nil 用真实时间。
+	Now   func() time.Time
+	Sleep func(ctx context.Context, d time.Duration) error
+}
+
+// WaitGone 删除发起后轮询各账号 Provider.List（按账号过滤，每账号每轮一次），
+// 直到全部目标从所属账号的节点清单消失。只应传入删除结果 OK 的台——失败台
+// 永不消失。瞬时 List 失败（DO 抖动）不算失败、继续轮询，仅记入超时信息。
+// 超时返回错误并列出未消失目标（account/id）；ctx 取消立即返回。
+func WaitGone(ctx context.Context, clients []AccountClient, targets []Target, o WaitGoneOptions) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	if o.Timeout <= 0 {
+		return errors.New("fleet: WaitGone 需要 Timeout > 0")
+	}
+	pending := map[string]map[string]bool{} // account -> 未消失 id 集
+	accounts := []string{}                  // 保持稳定遍历序
+	for _, t := range targets {
+		if pending[t.Account] == nil {
+			pending[t.Account] = map[string]bool{}
+			accounts = append(accounts, t.Account)
+		}
+		pending[t.Account][t.ID] = true
+	}
+	provs := map[string]provider.Provider{}
+	for _, c := range clients {
+		if _, need := pending[c.Name]; need {
+			provs[c.Name] = c.Provider
+		}
+	}
+	for _, acct := range accounts {
+		if provs[acct] == nil {
+			return fmt.Errorf("账号 %q 无对应客户端，无法核对是否消失", acct)
+		}
+	}
+	poll := max(o.Poll, waitGoneMinPoll)
+	now := o.Now
+	if now == nil {
+		now = time.Now
+	}
+	sleep := o.Sleep
+	if sleep == nil {
+		sleep = func(ctx context.Context, d time.Duration) error {
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+				return nil
+			}
+		}
+	}
+	deadline := now().Add(o.Timeout)
+	var lastErr error
+	for {
+		remaining := 0
+		for _, acct := range accounts {
+			ids := pending[acct]
+			if len(ids) == 0 {
+				continue // 该账号已全部消失，不再查询
+			}
+			servers, err := provs[acct].List(ctx)
+			if err != nil {
+				lastErr = fmt.Errorf("账号 %s 查询节点失败: %w", acct, err)
+				remaining += len(ids)
+				continue
+			}
+			present := make(map[string]bool, len(servers))
+			for _, s := range servers {
+				present[s.ID] = true
+			}
+			for id := range ids {
+				if !present[id] {
+					delete(ids, id) // 清单里已不见 → 消失
+				}
+			}
+			remaining += len(ids)
+		}
+		if remaining == 0 {
+			return nil
+		}
+		if !now().Before(deadline) {
+			msg := fmt.Sprintf("等待 %v 超时，仍有 %d 台未从 list 消失（DO 删除为异步，可稍后 list 复查或加长 --wait-gone）: %s",
+				o.Timeout, remaining, joinPending(pending, accounts))
+			if lastErr != nil {
+				msg += fmt.Sprintf("（期间最近一次查询失败: %v）", lastErr)
+			}
+			return errors.New(msg)
+		}
+		if err := sleep(ctx, poll); err != nil {
+			return fmt.Errorf("等待消失被取消: %w", err)
+		}
+	}
+}
+
+// joinPending 把未消失目标按账号序拼成 "account/id" 逗号串（错误信息用）。
+func joinPending(pending map[string]map[string]bool, accounts []string) string {
+	parts := make([]string, 0, len(accounts))
+	for _, acct := range accounts {
+		ids := make([]string, 0, len(pending[acct]))
+		for id := range pending[acct] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			parts = append(parts, acct+"/"+id)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
