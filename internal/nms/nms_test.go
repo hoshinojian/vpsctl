@@ -23,7 +23,7 @@ func server(account, name, ip string) fleet.ServerJSON {
 func accounts(entries map[string]Account) map[string]Account { return entries }
 
 func TestNodesIDIsName(t *testing.T) {
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0)
 	if len(got) != 1 {
 		t.Fatalf("节点数 = %d, want 1", len(got))
 	}
@@ -37,13 +37,13 @@ func TestNodesIDIsName(t *testing.T) {
 }
 
 func TestNodesDefaults(t *testing.T) {
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0)
 	n := got[0]
 	if n.DeviceType != "vps" {
 		t.Errorf("device_type = %q, want vps", n.DeviceType)
 	}
 	if n.SSHPort != 22 {
-		t.Errorf("ssh_port = %d, want 22", n.SSHPort)
+		t.Errorf("ssh_port = %d, want 22（0=缺省回退）", n.SSHPort)
 	}
 	if n.SSHUser != "root" {
 		t.Errorf("ssh_user = %q, want root（凭据缺省）", n.SSHUser)
@@ -56,17 +56,26 @@ func TestNodesDefaults(t *testing.T) {
 	}
 }
 
+// TestNodesHighPort：高位口 fleet（rl-drill v3.4 全 fleet SSHD_PORT 迁移）载荷必须
+// 逐节点携带该端口——NMS 导入缺省回退 22（topology/service.go），漏带即整批死台账。
+func TestNodesHighPort(t *testing.T) {
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 40222)
+	if got[0].SSHPort != 40222 {
+		t.Errorf("ssh_port = %d, want 40222（显式传入）", got[0].SSHPort)
+	}
+}
+
 func TestNodesCredentialFromAccount(t *testing.T) {
 	creds := accounts(map[string]Account{
 		"do-1": {Provider: "digitalocean", SSHUser: "deploy", SSHPassword: "s3cret"},
 	})
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0)
 	n := got[0]
 	if n.SSHUser != "deploy" || n.SSHPassword != "s3cret" {
 		t.Errorf("凭据未注入: user=%q password=%q", n.SSHUser, n.SSHPassword)
 	}
 	// 未配置凭据的账号落回缺省，密码留空（由调用方决定是否告警）
-	got = Nodes([]fleet.ServerJSON{server("do-2", "vps-do-2-01", "203.0.113.11")}, creds)
+	got = Nodes([]fleet.ServerJSON{server("do-2", "vps-do-2-01", "203.0.113.11")}, creds, 0)
 	if got[0].SSHUser != "root" || got[0].SSHPassword != "" {
 		t.Errorf("无凭据账号应落缺省: %+v", got[0])
 	}
@@ -74,7 +83,7 @@ func TestNodesCredentialFromAccount(t *testing.T) {
 
 func TestNodesCarryHardwareAndProvider(t *testing.T) {
 	creds := accounts(map[string]Account{"do-1": {Provider: "digitalocean"}})
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0)
 	n := got[0]
 	if n.Provider != "digitalocean" {
 		t.Errorf("provider = %q", n.Provider)
@@ -93,7 +102,7 @@ func TestNodesSortedByAccountThenName(t *testing.T) {
 		server("do-1", "vps-do-1-02", "203.0.113.10"),
 		server("do-1", "vps-do-1-01", "203.0.113.9"),
 	}
-	got := Nodes(servers, nil)
+	got := Nodes(servers, nil, 0)
 	want := []string{"vps-do-1-01", "vps-do-1-02", "vps-do-2-01"}
 	for i, n := range got {
 		if n.Name != want[i] {
@@ -105,7 +114,7 @@ func TestNodesSortedByAccountThenName(t *testing.T) {
 func TestPayloadJSONShape(t *testing.T) {
 	servers := []fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}
 	creds := accounts(map[string]Account{"do-1": {Provider: "digitalocean", SSHPassword: "pw"}})
-	b, err := json.Marshal(Payload{Nodes: Nodes(servers, creds)})
+	b, err := json.Marshal(Payload{Nodes: Nodes(servers, creds, 0)})
 	if err != nil {
 		t.Fatal(err)
 	}
