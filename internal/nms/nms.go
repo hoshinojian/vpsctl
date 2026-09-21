@@ -24,7 +24,7 @@ type Node struct {
 	Name         string `json:"name"`
 	DeviceType   string `json:"device_type"` // 恒 vps
 	ManagementIP string `json:"management_ip"`
-	SSHPort      int    `json:"ssh_port"` // DO 固定 22
+	SSHPort      int    `json:"ssh_port"` // 调用方注入（--ssh-port）；0 时 Nodes 内回退 22
 	SSHUser      string `json:"ssh_user"`
 	SSHPassword  string `json:"ssh_password"`
 	Region       string `json:"region,omitempty"`
@@ -44,7 +44,12 @@ type Payload struct {
 
 // Nodes 把跨账号节点渲染为载荷节点列表，按账号名、节点名排序。
 // accounts 缺某账号时凭据落缺省（root / 空密码），由调用方决定是否告警。
-func Nodes(servers []fleet.ServerJSON, accounts map[string]Account) []Node {
+// sshPort 为全 fleet 统一 SSH 端口（高位口 fleet 用，rl-drill v3.4）；0 回退 22。
+// NMS 导入侧对缺省载荷回退 22（topology/service.go），高位口 fleet 必须显式传入。
+func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int) []Node {
+	if sshPort == 0 {
+		sshPort = 22
+	}
 	sorted := append([]fleet.ServerJSON(nil), servers...)
 	sort.Slice(sorted, func(a, b int) bool {
 		if sorted[a].Account != sorted[b].Account {
@@ -67,7 +72,7 @@ func Nodes(servers []fleet.ServerJSON, accounts map[string]Account) []Node {
 			Name:          s.Name,
 			DeviceType:    "vps",
 			ManagementIP:  s.IPv4Public,
-			SSHPort:       22,
+			SSHPort:       sshPort,
 			SSHUser:       user,
 			SSHPassword:   ac.SSHPassword,
 			Region:        s.Region,

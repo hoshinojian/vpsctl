@@ -774,7 +774,7 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 	s.logOp("export", fmt.Sprintf("导出 NMS 载荷 %d 台（无 IP 跳过 %d，SSH 不可达跳过 %d）", len(keep), skipped, unreachable), 1, 0)
 	w.Header().Set("X-Vpsctl-Unreachable", strconv.Itoa(unreachable))
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts)})
+	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts, 0)})
 }
 
 // handleOperations 返回最近的操作历史（内存态，serve 重启即清）。

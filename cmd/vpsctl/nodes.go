@@ -40,6 +40,7 @@ func runNodeList(args []string) error {
 	accounts := fs.String("accounts", "", "账号配置路径（默认 ~/.config/vpsctl/accounts.json，或 $VPSCTL_ACCOUNTS）")
 	only := fs.String("only", "", "逗号分隔的账号名：只列出指定账号（默认全部账号）")
 	format := fs.String("format", "json", "输出格式：json（vpsctl 清单）| nms（NMS 导入载荷）")
+	sshPort := fs.Int("ssh-port", 22, "SSH 端口（导出载荷 ssh_port 字段与连通性预检共用；高位口 fleet 传该值，缺省 22）")
 	noCheckSSH := fs.Bool("no-check-ssh", false, "跳过导出前的 SSH 端口连通性预检")
 	tag := fs.String("tag", "", "只保留含该 tag 的节点（如 batch:20260908T120000Z）")
 	status := fs.String("status", "", "只保留该状态的节点（active/new/off…）")
@@ -71,7 +72,7 @@ func runNodeList(args []string) error {
 	defer stop()
 	switch *format {
 	case "nms":
-		return printNMS(ctx, cfg, clients, entries, *output, !*noCheckSSH)
+		return printNMS(ctx, cfg, clients, entries, *output, !*noCheckSSH, *sshPort)
 	default:
 		res := listResult{Droplets: entries}
 		for _, e := range errs {
@@ -148,7 +149,8 @@ func hasTag(tags []string, want string) bool {
 
 // printNMS 渲染并输出 NMS 导入载荷：无公网 IPv4 的节点跳过（NMS 校验
 // management_ip 必填），凭据缺密码时告警（导入会被 04 §2.2 必填校验拒绝）。
-func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClient, entries []nodeEntry, output string, checkSSH bool) error {
+// sshPort 同时用于载荷 ssh_port 字段与连通性预检（高位口 fleet 单源）。
+func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClient, entries []nodeEntry, output string, checkSSH bool, sshPort int) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
@@ -177,13 +179,13 @@ func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClie
 	for _, name := range skipped {
 		fmt.Fprintf(os.Stderr, "警告: %s 无公网 IPv4，未包含在 NMS 载荷（management_ip 必填）\n", name)
 	}
-	// SSH 连通性预检：22 端口不通的节点同样跳过（防止灌进 NMS 变死台账）
+	// SSH 连通性预检：目标端口不通的节点同样跳过（防止灌进 NMS 变死台账）
 	if checkSSH && len(keep) > 0 {
 		hosts := make([]string, 0, len(keep))
 		for _, sv := range keep {
 			hosts = append(hosts, sv.IPv4Public)
 		}
-		probe := fleet.ProbeSSHAll(ctx, hosts, 22, 2*time.Second)
+		probe := fleet.ProbeSSHAll(ctx, hosts, sshPort, 2*time.Second)
 		filtered := keep[:0]
 		for _, sv := range keep {
 			if err := probe[sv.IPv4Public]; err != nil {
@@ -204,7 +206,7 @@ func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClie
 		fmt.Fprintln(os.Stderr, "注意: 导出文件含明文 SSH 密码，已按 600 权限写入，勿提交进任何仓库")
 	}
 
-	payload := nms.Payload{Nodes: nms.Nodes(keep, accts)}
+	payload := nms.Payload{Nodes: nms.Nodes(keep, accts, sshPort)}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
