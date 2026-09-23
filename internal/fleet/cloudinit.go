@@ -27,6 +27,9 @@ type CloudInitParams struct {
 	// Tunnel443 打开 ssh-over-443：远端装 stunnel4 监听 443 转发到本机 SSHPort，
 	// 供出口代理 TUN 劫持直连 22 的本机经 443 隧道接入（P68 家族）。缺省关。
 	Tunnel443 bool
+	// AuthorizedKeys 是运维公钥（每行一条，authorized_keys 格式），缺省不注入。
+	// 与节点纳管无关（纳管走密码）——供编排机以密钥运维该机（免密码登录自动化）。
+	AuthorizedKeys []string
 }
 
 // CloudInitSpec 在密码 cloud-config 之上，可选注入 sshd 高位端口与 443 隧道。
@@ -90,6 +93,18 @@ func CloudInitSpec(p CloudInitParams) (string, error) {
 	}
 
 	b.WriteString("ssh_pwauth: true\n")
+	if len(p.AuthorizedKeys) > 0 {
+		b.WriteString("ssh_authorized_keys:\n")
+		for _, k := range p.AuthorizedKeys {
+			k = strings.TrimSpace(k)
+			if k == "" {
+				continue
+			}
+			// YAML 单引号标量：' → ''（SSH 公钥形如 "ssh-ed25519 AAAA... comment"，
+			// 含空格，单引号包裹安全）。
+			fmt.Fprintf(&b, "  - '%s'\n", strings.ReplaceAll(k, "'", "''"))
+		}
+	}
 	b.WriteString("chpasswd:\n")
 	b.WriteString("  expire: false\n")
 	b.WriteString("  users:\n")

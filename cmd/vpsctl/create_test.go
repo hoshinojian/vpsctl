@@ -31,7 +31,7 @@ func clientsOf(names ...string) []fleet.AccountClient {
 // 无密码 ∧ 无 user-data ∧ 无 ssh-keys → fail-fast，错误信息含账号与逃生门指引。
 func TestInjectPasswordsBareFailsFast(t *testing.T) {
 	cfg := cfgOf(config.Account{Name: "a1"}, config.Account{Name: "a2", SSHPassword: "pw"})
-	err := injectPasswords(cfg, clientsOf("a1", "a2"), "", nil, 0, false, false, &fleet.Options{})
+	err := injectPasswords(cfg, clientsOf("a1", "a2"), "", nil, 0, false, nil, false, &fleet.Options{})
 	if err == nil || !strings.Contains(err.Error(), "a1") || !strings.Contains(err.Error(), "--allow-bare") {
 		t.Fatalf("裸机应 fail-fast 并指认账号与逃生门：%v", err)
 	}
@@ -40,7 +40,7 @@ func TestInjectPasswordsBareFailsFast(t *testing.T) {
 // --allow-bare 放行：不报错（警告走 stderr）。
 func TestInjectPasswordsBareAllowEscape(t *testing.T) {
 	cfg := cfgOf(config.Account{Name: "a1"})
-	if err := injectPasswords(cfg, clientsOf("a1"), "", nil, 0, false, true, &fleet.Options{}); err != nil {
+	if err := injectPasswords(cfg, clientsOf("a1"), "", nil, 0, false, nil, true, &fleet.Options{}); err != nil {
 		t.Fatalf("--allow-bare 应放行：%v", err)
 	}
 }
@@ -49,7 +49,7 @@ func TestInjectPasswordsBareAllowEscape(t *testing.T) {
 func TestInjectPasswordlessWithUserDataNotBare(t *testing.T) {
 	cfg := cfgOf(config.Account{Name: "a1"})
 	opts := &fleet.Options{}
-	if err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, false, opts); err != nil {
+	if err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, nil, false, opts); err != nil {
 		t.Fatalf("user-data 分叉不应报错：%v", err)
 	}
 	if len(opts.UserDataByAccount) != 0 {
@@ -60,7 +60,7 @@ func TestInjectPasswordlessWithUserDataNotBare(t *testing.T) {
 // 无密码账号 + --ssh-keys → 不算裸机。
 func TestInjectPasswordlessWithSSHKeysNotBare(t *testing.T) {
 	cfg := cfgOf(config.Account{Name: "a1"})
-	if err := injectPasswords(cfg, clientsOf("a1"), "", []string{"12345"}, 0, false, false, &fleet.Options{}); err != nil {
+	if err := injectPasswords(cfg, clientsOf("a1"), "", []string{"12345"}, 0, false, nil, false, &fleet.Options{}); err != nil {
 		t.Fatalf("ssh-keys 兜底不应报错：%v", err)
 	}
 }
@@ -68,7 +68,7 @@ func TestInjectPasswordlessWithSSHKeysNotBare(t *testing.T) {
 // 有密码账号 + --user-data 互斥报错（既有行为回归）。
 func TestInjectPasswordUserDataMutuallyExclusive(t *testing.T) {
 	cfg := cfgOf(config.Account{Name: "a1", SSHPassword: "pw"})
-	err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, false, &fleet.Options{})
+	err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, nil, false, &fleet.Options{})
 	if err == nil || !strings.Contains(err.Error(), "互斥") {
 		t.Fatalf("密码账号与 --user-data 同给应报互斥：%v", err)
 	}

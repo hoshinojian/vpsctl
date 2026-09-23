@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/config"
@@ -27,6 +28,7 @@ func runCreate(args []string) error {
 	userData := fs.String("user-data", "", "cloud-init 文件路径")
 	sshPort := fs.Int("ssh-port", 0, "建机注入的 sshd 监听端口（0=不动缺省 22；非缺省值让自动生成的 cloud-init 禁 ssh.socket 并按该端口拉起 sshd）")
 	tunnel443 := fs.Bool("tunnel-443", false, "建机时在远端起 stunnel4 监听 443 桥到 ssh_port（供出口代理 TUN 劫持直连 22 的本机经 443 接入；需 --ssh-port）")
+	authKeys := fs.String("authorized-keys", "", "注入机器 authorized_keys 的运维公钥文件路径（每行一条；供免密运维，与节点纳管无关）")
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
 	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
@@ -72,6 +74,17 @@ func runCreate(args []string) error {
 		Monitoring:  true,
 		WaitTimeout: *wait,
 	}
+	if *authKeys != "" {
+		b, err := os.ReadFile(*authKeys)
+		if err != nil {
+			return fmt.Errorf("读取 authorized-keys: %w", err)
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				opts.AuthorizedKeys = append(opts.AuthorizedKeys, line)
+			}
+		}
+	}
 	if *userData != "" {
 		b, err := os.ReadFile(*userData)
 		if err != nil {
@@ -79,7 +92,7 @@ func runCreate(args []string) error {
 		}
 		opts.UserData = string(b)
 	}
-	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *sshPort, *tunnel443, *allowBare, &opts); err != nil {
+	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *sshPort, *tunnel443, opts.AuthorizedKeys, *allowBare, &opts); err != nil {
 		return err
 	}
 
@@ -147,7 +160,7 @@ func resolveStartIndex(ctx context.Context, clients []fleet.AccountClient, fs *f
 // V1 防呆（92 台轮 P81 裸机交付——无密码账号 + 不传 user-data/ssh-keys = 机器无法
 // SSH 管理，探针负事实升级后拉黑死锁）：账号无 ssh_password ∧ 无 --user-data ∧
 // 无 --ssh-keys 时缺省 fail-fast；--allow-bare 显式放行（降级为 stderr 警告留痕）。
-func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, sshPort int, tunnel443 bool, allowBare bool, opts *fleet.Options) error {
+func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, sshPort int, tunnel443 bool, authKeys []string, allowBare bool, opts *fleet.Options) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
@@ -166,6 +179,7 @@ func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPa
 		}
 		ud, err := fleet.CloudInitSpec(fleet.CloudInitParams{
 			User: a.SSHUser, Password: a.SSHPassword, SSHPort: sshPort, Tunnel443: tunnel443,
+			AuthorizedKeys: authKeys,
 		})
 		if err != nil {
 			return fmt.Errorf("账号 %s: %w", c.Name, err)

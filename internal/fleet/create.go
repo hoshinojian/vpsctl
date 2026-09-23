@@ -42,12 +42,14 @@ type Options struct {
 	SSHPort int
 	// Tunnel443 打开 ssh-over-443（远端 stunnel 桥到 SSHPort），供出口代理 TUN
 	// 劫持直连 22 的本机经 443 接入（P68 家族）。需要 SSHPort 显式给出。
-	Tunnel443   bool
-	Monitoring  bool
-	WaitTimeout time.Duration // >0 时等待 active 且有公网 IPv4
-	PollEvery   time.Duration // 轮询间隔，默认 5s
-	Concurrency int           // 单账号并发，默认 4
-	Now         func() time.Time
+	Tunnel443 bool
+	// AuthorizedKeys 注入到机器 authorized_keys（运维公钥，每行一条），供免密运维。
+	AuthorizedKeys []string
+	Monitoring     bool
+	WaitTimeout    time.Duration // >0 时等待 active 且有公网 IPv4
+	PollEvery      time.Duration // 轮询间隔，默认 5s
+	Concurrency    int           // 单账号并发，默认 4
+	Now            func() time.Time
 }
 
 // PlanEntry 是 dry-run 的单账号计划。

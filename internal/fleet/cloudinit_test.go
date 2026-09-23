@@ -151,6 +151,22 @@ func TestCloudInitTunnel443NeedsPort(t *testing.T) {
 	}
 }
 
+// 运维公钥注入（AuthorizedKeys → ssh_authorized_keys），供免密运维。
+func TestCloudInitAuthorizedKeys(t *testing.T) {
+	k := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterial user@host"
+	got, err := CloudInitSpec(CloudInitParams{User: "root", Password: "pw", AuthorizedKeys: []string{k}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "ssh_authorized_keys:") || !strings.Contains(got, k) {
+		t.Errorf("authorized_keys 未注入:\n%s", got)
+	}
+	plain, _ := CloudInitSpec(CloudInitParams{User: "root", Password: "pw"})
+	if strings.Contains(plain, "ssh_authorized_keys") {
+		t.Errorf("无公钥时不应有 ssh_authorized_keys 段:\n%s", plain)
+	}
+}
+
 func TestCreatePerAccountUserDataOverrides(t *testing.T) {
 	fa, fb := &fakeProvider{}, &fakeProvider{}
 	o := Options{
