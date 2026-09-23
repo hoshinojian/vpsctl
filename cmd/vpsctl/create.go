@@ -26,6 +26,7 @@ func runCreate(args []string) error {
 	tags := fs.String("tags", "", "逗号分隔的附加 tag（自动追加 batch:<时间戳>）")
 	userData := fs.String("user-data", "", "cloud-init 文件路径")
 	sshPort := fs.Int("ssh-port", 0, "建机注入的 sshd 监听端口（0=不动缺省 22；非缺省值让自动生成的 cloud-init 禁 ssh.socket 并按该端口拉起 sshd）")
+	tunnel443 := fs.Bool("tunnel-443", false, "建机时在远端起 stunnel4 监听 443 桥到 ssh_port（供出口代理 TUN 劫持直连 22 的本机经 443 接入；需 --ssh-port）")
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
 	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
@@ -67,6 +68,7 @@ func runCreate(args []string) error {
 		SSHKeys:     splitCSV(*sshKeys),
 		ExtraTags:   splitCSV(*tags),
 		SSHPort:     *sshPort,
+		Tunnel443:   *tunnel443,
 		Monitoring:  true,
 		WaitTimeout: *wait,
 	}
@@ -77,7 +79,7 @@ func runCreate(args []string) error {
 		}
 		opts.UserData = string(b)
 	}
-	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *sshPort, *allowBare, &opts); err != nil {
+	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *sshPort, *tunnel443, *allowBare, &opts); err != nil {
 		return err
 	}
 
@@ -145,7 +147,7 @@ func resolveStartIndex(ctx context.Context, clients []fleet.AccountClient, fs *f
 // V1 防呆（92 台轮 P81 裸机交付——无密码账号 + 不传 user-data/ssh-keys = 机器无法
 // SSH 管理，探针负事实升级后拉黑死锁）：账号无 ssh_password ∧ 无 --user-data ∧
 // 无 --ssh-keys 时缺省 fail-fast；--allow-bare 显式放行（降级为 stderr 警告留痕）。
-func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, sshPort int, allowBare bool, opts *fleet.Options) error {
+func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, sshPort int, tunnel443 bool, allowBare bool, opts *fleet.Options) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
@@ -162,7 +164,9 @@ func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPa
 		if userDataPath != "" {
 			return fmt.Errorf("账号 %s 配置了 ssh_password，与 --user-data 互斥：请把密码并入该 cloud-config 后去掉其一", c.Name)
 		}
-		ud, err := fleet.CloudInit(a.SSHUser, a.SSHPassword, sshPort)
+		ud, err := fleet.CloudInitSpec(fleet.CloudInitParams{
+			User: a.SSHUser, Password: a.SSHPassword, SSHPort: sshPort, Tunnel443: tunnel443,
+		})
 		if err != nil {
 			return fmt.Errorf("账号 %s: %w", c.Name, err)
 		}

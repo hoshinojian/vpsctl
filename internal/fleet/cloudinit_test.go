@@ -121,6 +121,36 @@ func TestCloudInitPortRange(t *testing.T) {
 	}
 }
 
+// 443 隧道：落 stunnel 配置（accept 443 -> 本机 sshd 端口）+ 起 stunnel4。
+func TestCloudInitTunnel443(t *testing.T) {
+	got, err := CloudInitSpec(CloudInitParams{User: "root", Password: "pw", SSHPort: 40222, Tunnel443: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/etc/stunnel/ssh-443.conf",
+		"accept = 443",
+		"connect = 127.0.0.1:40222",
+		"stunnel4",
+		"stunnel.pem",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("443 隧道 cloud-init 缺 %q:\n%s", want, got)
+		}
+	}
+	// 隧道与高位口共存：sshd drop-in 仍在
+	if !strings.Contains(got, "Port 40222") {
+		t.Errorf("开隧道时高位口配置不应丢失:\n%s", got)
+	}
+}
+
+// 隧道需要显式端口（443 桥到该端口，缺端口无从桥接）。
+func TestCloudInitTunnel443NeedsPort(t *testing.T) {
+	if _, err := CloudInitSpec(CloudInitParams{User: "root", Password: "pw", Tunnel443: true}); err == nil {
+		t.Error("Tunnel443 而 ssh_port=0 应报错")
+	}
+}
+
 func TestCreatePerAccountUserDataOverrides(t *testing.T) {
 	fa, fb := &fakeProvider{}, &fakeProvider{}
 	o := Options{
