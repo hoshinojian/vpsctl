@@ -44,8 +44,13 @@ type Payload struct {
 
 // Nodes 把跨账号节点渲染为载荷节点列表，按账号名、节点名排序。
 // accounts 缺某账号时凭据落缺省（root / 空密码），由调用方决定是否告警。
-// sshPort 为全 fleet 统一 SSH 端口（高位口 fleet 用，rl-drill v3.4）；0 回退 22。
-// NMS 导入侧对缺省载荷回退 22（topology/service.go），高位口 fleet 必须显式传入。
+//
+// ssh_port 取值优先级（2026-09-23，把端口所有权从外部编排收进 vpsctl）：
+//  1. 节点自带 s.SSHPort（create --ssh-port 建机时回填进结果 JSON 的权威值）；
+//  2. 全局 sshPort 兜底（list -ssh-port；覆盖"机器是别处建的、只知全局端口"场景）；
+//  3. 都缺省回退 22。
+//
+// NMS 导入侧对缺省载荷回退 22（topology/service.go），高位口 fleet 必须显式带上。
 func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int) []Node {
 	if sshPort == 0 {
 		sshPort = 22
@@ -67,12 +72,16 @@ func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int)
 		if user == "" {
 			user = "root"
 		}
+		port := sshPort
+		if s.SSHPort != 0 {
+			port = s.SSHPort
+		}
 		out = append(out, Node{
 			ID:            s.Name,
 			Name:          s.Name,
 			DeviceType:    "vps",
 			ManagementIP:  s.IPv4Public,
-			SSHPort:       sshPort,
+			SSHPort:       port,
 			SSHUser:       user,
 			SSHPassword:   ac.SSHPassword,
 			Region:        s.Region,
