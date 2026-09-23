@@ -76,7 +76,7 @@ func TestCloudInitZeroPortMatchesPassword(t *testing.T) {
 }
 
 // 非缺省端口：必须禁 socket activation 再按端口拉起（Ubuntu 24.04 P7 形态）。
-func TestCloudInitHighPortInjectsshd(t *testing.T) {
+func TestCloudInitHighPortInjectsSshd(t *testing.T) {
 	got, err := CloudInit("root", "pw", 40222)
 	if err != nil {
 		t.Fatal(err)
@@ -84,16 +84,32 @@ func TestCloudInitHighPortInjectsshd(t *testing.T) {
 	for _, want := range []string{
 		"Port 40222",
 		"PasswordAuthentication yes",
-		"disable, --now, ssh.socket",
 		"99-vpsctl.conf",
+		"disable, --now, ssh.socket",
+		"write_files:",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("高位口 cloud-init 缺 %q:\n%s", want, got)
 		}
 	}
-	// 必须仍从 #cloud-config 头开始（runcmd 是顶层 YAML 键，不能破头）
+	// 必须仍从 #cloud-config 头开始（write_files/runcmd 是顶层 YAML 键，不能破头）
 	if !strings.HasPrefix(got, "#cloud-config\n") {
 		t.Errorf("必须以 #cloud-config 头开始:\n%s", got)
+	}
+}
+
+// 生成物必须纯 ASCII（P75：DO user-data 非 ASCII 会被搅成 C1 控制字符）。
+func TestCloudInitIsASCII(t *testing.T) {
+	for _, p := range []int{0, 22, 40222} {
+		got, err := CloudInit("root", "pw", p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < len(got); i++ {
+			if got[i] > 0x7f {
+				t.Fatalf("ssh_port=%d 的生成物含非 ASCII 字节（偏移 %d, 0x%02x）:\n%s", p, i, got[i], got)
+			}
+		}
 	}
 }
 
