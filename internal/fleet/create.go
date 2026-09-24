@@ -36,11 +36,20 @@ type Options struct {
 	UserData   string   // cloud-init 脚本，可空（全部账号共用）
 	// UserDataByAccount 账号专属 user-data（如账号级密码注入），存在时优先于 UserData。
 	UserDataByAccount map[string]string
-	Monitoring        bool
-	WaitTimeout       time.Duration // >0 时等待 active 且有公网 IPv4
-	PollEvery         time.Duration // 轮询间隔，默认 5s
-	Concurrency       int           // 单账号并发，默认 4
-	Now               func() time.Time
+	// SSHPort 是建机时注入的 sshd 监听端口（0/22 = 不动缺省）。非缺省时写进
+	// 自动生成的 cloud-init（见 CloudInit），并回填进结果 JSON 的 ssh_port，
+	// 供 NMS 导入载荷逐节点取用。
+	SSHPort int
+	// Tunnel443 打开 ssh-over-443（远端 stunnel 桥到 SSHPort），供出口代理 TUN
+	// 劫持直连 22 的本机经 443 接入（P68 家族）。需要 SSHPort 显式给出。
+	Tunnel443 bool
+	// AuthorizedKeys 注入到机器 authorized_keys（运维公钥，每行一条），供免密运维。
+	AuthorizedKeys []string
+	Monitoring     bool
+	WaitTimeout    time.Duration // >0 时等待 active 且有公网 IPv4
+	PollEvery      time.Duration // 轮询间隔，默认 5s
+	Concurrency    int           // 单账号并发，默认 4
+	Now            func() time.Time
 }
 
 // PlanEntry 是 dry-run 的单账号计划。
@@ -158,6 +167,7 @@ type ServerJSON struct {
 	PriceMonthly float64   `json:"price_monthly"`
 	IPv4Public   string    `json:"ipv4_public,omitempty"`
 	IPv4Private  string    `json:"ipv4_private,omitempty"`
+	SSHPort      int       `json:"ssh_port,omitempty"` // 建机注入的 sshd 端口（缺省 0 = 未指定/22）
 	Tags         []string  `json:"tags,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	Lat          float64   `json:"lat,omitempty"` // 等距投影用，未知区域为 0
@@ -276,7 +286,9 @@ func createAccount(ctx context.Context, o Options, ac AccountClient, batch strin
 				}
 			}
 			mu.Lock()
-			out.created = append(out.created, ToServerJSON(s))
+			sj := ToServerJSON(s)
+			sj.SSHPort = o.SSHPort // 建机注入的 sshd 端口不是提供商属性，由本层回填
+			out.created = append(out.created, sj)
 			mu.Unlock()
 		}(idx, name)
 	}

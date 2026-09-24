@@ -65,6 +65,23 @@ func TestNodesHighPort(t *testing.T) {
 	}
 }
 
+// TestNodesPerNodePortOverridesGlobal：节点自带 ssh_port（create --ssh-port 建机时回填）
+// 优先于全局 -ssh-port——同一 fleet 混合端口时不得被全局值覆盖（端口所有权归建机侧）。
+func TestNodesPerNodePortOverridesGlobal(t *testing.T) {
+	s := server("do-1", "vps-do-1-01", "203.0.113.10")
+	s.SSHPort = 40222
+	got := Nodes([]fleet.ServerJSON{s}, nil, 22)
+	if got[0].SSHPort != 40222 {
+		t.Errorf("ssh_port = %d, want 40222（节点自带优先于全局 22）", got[0].SSHPort)
+	}
+	// 节点未带端口时全局兜底
+	s.SSHPort = 0
+	got = Nodes([]fleet.ServerJSON{s}, nil, 40222)
+	if got[0].SSHPort != 40222 {
+		t.Errorf("ssh_port = %d, want 40222（无自带端口回落全局）", got[0].SSHPort)
+	}
+}
+
 func TestNodesCredentialFromAccount(t *testing.T) {
 	creds := accounts(map[string]Account{
 		"do-1": {Provider: "digitalocean", SSHUser: "deploy", SSHPassword: "s3cret"},
