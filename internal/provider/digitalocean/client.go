@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/provider"
@@ -34,6 +35,9 @@ type Client struct {
 	maxRetries int
 	// sleep 抽象出来以便测试 429 退避节奏
 	sleep func(ctx context.Context, d time.Duration) error
+	// tag 首建须账号内串行（并发挂同一个新 tag 会互相冲突），已确认存在的 tag 缓存于此。
+	tagMu     sync.Mutex
+	knownTags map[string]bool
 }
 
 // defaultHTTPTimeout 单请求总超时。上游网络挂起（丢包/代理吞连）时

@@ -17,6 +17,7 @@ const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean 先行）
   vpsctl delete [flags]             批量删除（台数确认，宁可漏删不可误删）
   vpsctl rebuild [flags]            批量重装（--image，磁盘清空不可恢复）
   vpsctl resize [flags]             批量改配（--size，自动关机→改配→开机）
+  vpsctl tag add|remove [flags]     给既有节点增删 tag（--tags；幂等，--dry-run 看计划）
   vpsctl serve [flags]              本地 Web 管理台（查看/关机/开机/删除）
   vpsctl accounts list|add|edit|remove
                                     账号配置管理
@@ -50,6 +51,8 @@ func main() {
 		die(runRebuild(os.Args[2:]))
 	case "resize":
 		die(runResize(os.Args[2:]))
+	case "tag":
+		die(runTag(os.Args[2:]))
 	case "accounts":
 		die(runAccounts(os.Args[2:]))
 	case "serve":

@@ -24,17 +24,39 @@ func signalContext() (context.Context, func()) {
 	return signal.NotifyContext(context.Background(), os.Interrupt)
 }
 
-// resolveTargets 按 --tag / --ids（account/id 逗号分隔）解析操作目标，
-// 两者互斥且必给其一。解析需要实时拉取各账号节点；任一账号查询失败即中止
-// （破坏性操作宁可不动手）。
-func resolveTargets(ctx context.Context, clients []fleet.AccountClient, tag, idsCSV string) ([]fleet.Target, error) {
-	tag, idsCSV = strings.TrimSpace(tag), strings.TrimSpace(idsCSV)
+// validateTargetSelector 校验 --tag / --ids 的给法：两者互斥且必给其一。
+// 不碰账号配置也不发请求，子命令可据此在加载账号之前就拦下参数错误。
+func validateTargetSelector(tag, idsCSV string) error {
 	switch {
-	case tag != "" && idsCSV != "":
-		return nil, errors.New("--tag 与 --ids 只能给一个")
-	case tag == "" && idsCSV == "":
-		return nil, errors.New("需要 --tag 或 --ids 指定操作目标（可用 list 查看节点）")
+	case strings.TrimSpace(tag) != "" && strings.TrimSpace(idsCSV) != "":
+		return errors.New("--tag 与 --ids 只能给一个")
+	case strings.TrimSpace(tag) == "" && strings.TrimSpace(idsCSV) == "":
+		return errors.New("需要 --tag 或 --ids 指定操作目标（可用 list 查看节点）")
 	}
+	return nil
+}
+
+// resolveTargets 按 --tag / --ids（account/id 逗号分隔）解析操作目标（账号 + ID）；
+// 需要节点其余字段的调用方用 resolveServers。
+func resolveTargets(ctx context.Context, clients []fleet.AccountClient, tag, idsCSV string) ([]fleet.Target, error) {
+	servers, err := resolveServers(ctx, clients, tag, idsCSV)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]fleet.Target, 0, len(servers))
+	for _, s := range servers {
+		targets = append(targets, fleet.Target{Account: s.Account, ID: s.ID})
+	}
+	return targets, nil
+}
+
+// resolveServers 按 --tag / --ids 解析操作目标并返回对应节点（序 = 选择序）。
+// 解析需要实时拉取各账号节点；任一账号查询失败即中止（破坏性操作宁可不动手）。
+func resolveServers(ctx context.Context, clients []fleet.AccountClient, tag, idsCSV string) ([]provider.Server, error) {
+	if err := validateTargetSelector(tag, idsCSV); err != nil {
+		return nil, err
+	}
+	tag, idsCSV = strings.TrimSpace(tag), strings.TrimSpace(idsCSV)
 	var servers []provider.Server
 	for _, ac := range clients {
 		ss, err := ac.Provider.List(ctx)
@@ -43,10 +65,24 @@ func resolveTargets(ctx context.Context, clients []fleet.AccountClient, tag, ids
 		}
 		servers = append(servers, ss...)
 	}
+	var targets []fleet.Target
 	if tag != "" {
-		return fleet.SelectByTag(servers, tag), nil
+		targets = fleet.SelectByTag(servers, tag)
+	} else {
+		var err error
+		if targets, err = fleet.SelectByIDs(servers, splitCSV(idsCSV)); err != nil {
+			return nil, err
+		}
 	}
-	return fleet.SelectByIDs(servers, splitCSV(idsCSV))
+	byKey := make(map[fleet.Target]provider.Server, len(servers))
+	for _, s := range servers {
+		byKey[fleet.Target{Account: s.Account, ID: s.ID}] = s
+	}
+	out := make([]provider.Server, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, byKey[t])
+	}
+	return out, nil
 }
 
 // confirmCount 交互式确认台数：--confirm 给了直接校验；否则从 stdin 读。

@@ -113,6 +113,29 @@ curl -s -X POST http://<nms-host>:<port>/api/v1/topology -d @nms-nodes.json
   冗余字段（NMS 现载荷忽略，扩契约后直接可用）
 - **载荷含明文密码**：`--output` 文件按 600 权限写入，勿提交进任何仓库
 
+## 标签：`vpsctl tag add|remove`
+
+给**已有**节点增删 tag（`create --tags` 只管建机时带上）。目标选法与其他批操作一致
+（`--ids` / `--tag` 二选一，`--only` 限账号）：
+
+```sh
+vpsctl tag add    --ids do-1/3164444,do-2/3164445 --tags managed-by:demo-nms
+vpsctl tag remove --tag batch:20260908T120000Z --tags env:lab
+vpsctl tag add    --tag nms-prod --tags managed-by:demo-nms --dry-run   # 只看计划
+```
+
+- **只动 tag**：不碰电源与磁盘
+- **幂等**：追加已持有的、摘除未持有的节点直接跳过（不发请求）；所选节点全部已满足时
+  打印"无需变更"并退出 0
+- **`--dry-run`**：逐台打印将变更的目标（名称 / 现有 tag / 追加 / 摘除），只查节点、
+  不调写接口——打出来的计划就是真实执行会写的那几台
+- **动手前整体预检**：涉及账号的提供商不支持改 tag、或 tag 名不合其约束，整体中止，
+  一台都不动
+- **tag 名约束由提供商定**：DigitalOcean 只收字母、数字、下划线、短横线、冒号
+  （最长 255），中文、空格会在本地被拒，不会发到 API
+- 逐台结果 JSON（`account`/`id`/`ok`/`error`），部分失败退出码 1；失败后重跑同一条
+  命令即可补齐
+
 ## 生命周期：`vpsctl power | delete`
 
 与 webui 共用同一套实现，防误删语义两端一致。目标二选一：`--tag`（如
@@ -179,6 +202,9 @@ vpsctl keys --only team3      # 查询单个账号
 1. 新建 `internal/provider/<name>/`，实现 `provider.Provider` 接口（List/Get/Create/Delete/Power/ActionStatus/SSHKeys/Regions/Sizes/Images）
 2. 在 `init()` 里 `provider.Register("<name>", factory)`；`cmd/vpsctl/main.go` 加一条 blank import
 3. `accounts.json` 里把对应账号的 `provider` 改为 `<name>` 即可，编排层与 UI 零改动
+
+要同时支持 `vpsctl tag`，另实现可选的 `provider.Tagger`（校验 tag 名 + 增删）；不实现时
+该账号的节点在 tag 子命令里会被整体预检拒绝，其余子命令不受影响。
 
 参考资料（各家官方客户端，端点语义/分页/签名的"标准答案"）：
 DigitalOcean [godo](https://github.com/digitalocean/godo)、
