@@ -107,6 +107,26 @@ type imagesPage struct {
 	Images []image `json:"images"`
 }
 
+// ---- tag ----
+
+type tagName struct {
+	Name string `json:"name"`
+}
+
+type tagPage struct {
+	Tag tagName `json:"tag"`
+}
+
+// tagResourcesBody 是把 tag 挂到/摘自资源的请求体；本工具只挂节点，resource_type 恒为 droplet。
+type tagResourcesBody struct {
+	Resources []tagResource `json:"resources"`
+}
+
+type tagResource struct {
+	ResourceID   string `json:"resource_id"`
+	ResourceType string `json:"resource_type"`
+}
+
 // ---- 创建请求体 ----
 
 type createBody struct {

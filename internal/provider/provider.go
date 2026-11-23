@@ -108,6 +108,16 @@ type Provider interface {
 	Images(ctx context.Context) ([]Image, error)
 }
 
+// Tagger 是可选能力：给既有节点增删 tag（不动电源、不重建）。不并入 Provider——
+// 未支持的提供商照旧只实现 Provider；上层经类型断言探测，缺失即在动手前整体拒绝。
+type Tagger interface {
+	// ValidateTags 不发请求地校验 tag 名是否合提供商约束，返回首个不合法名的原因。
+	ValidateTags(tags []string) error
+	// Tag 给节点追加 add、摘除 remove，两者均幂等：已持有的追加、未持有的摘除
+	// 都应成功。add 里尚不存在的 tag 由实现负责创建。
+	Tag(ctx context.Context, id string, add, remove []string) error
+}
+
 // Factory 按 (账号名, token) 构造客户端；hc 为 nil 时用默认 http.Client。
 type Factory func(account, token string, hc *http.Client) (Provider, error)
 
