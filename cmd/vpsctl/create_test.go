@@ -1,8 +1,8 @@
 package main
 
-// V1 防呆单测（post-campaign-fixes-plan）：裸机判定三条件（无 ssh_password ∧ 无
-// --user-data ∧ 无 --ssh-keys）——缺省 fail-fast，--allow-bare 放行；有密码账号
-// 与 --user-data 互斥的既有行为不变。
+// 置备规则单测：缺省给每台节点一个随机 root 密码；只有显式不注入密码（--user-data /
+// --no-password）时才可能建出裸机，这时裸机保护（P81）与"账号固定密码不得被导出时
+// 误用"的互斥规则照旧生效。
 
 import (
 	"context"
@@ -28,49 +28,113 @@ func clientsOf(names ...string) []fleet.AccountClient {
 	return out
 }
 
-// 无密码 ∧ 无 user-data ∧ 无 ssh-keys → fail-fast，错误信息含账号与逃生门指引。
-func TestInjectPasswordsBareFailsFast(t *testing.T) {
-	cfg := cfgOf(config.Account{Name: "a1"}, config.Account{Name: "a2", SSHPassword: "pw"})
-	err := injectPasswords(cfg, clientsOf("a1", "a2"), "", nil, 0, false, nil, false, &fleet.Options{})
+func pp(accts []config.Account, names ...string) provisionParams {
+	return provisionParams{cfg: cfgOf(accts...), clients: clientsOf(names...)}
+}
+
+var nodeNames = []string{"vps-a1-sgp1-01", "vps-a2-sgp1-01"}
+
+// 缺省：每个账号的每台节点各拿一个随机密码，写进它自己的 cloud-init；账号配没配
+// ssh_password 都一样，配了也不用那个固定密码。
+func TestProvisionDefaultIsRandomPerNode(t *testing.T) {
+	p := pp([]config.Account{{Name: "a1"}, {Name: "a2", SSHPassword: "fixed-pw"}}, "a1", "a2")
+	opts := &fleet.Options{Clients: p.clients, Prefix: "vps", Region: "sgp1", Count: 1}
+	generated, err := injectPasswords(p, opts)
+	if err != nil {
+		t.Fatalf("缺省不应报错：%v", err)
+	}
+	if len(generated) != 2 || len(opts.UserDataByNode) != 2 || len(opts.UserDataByAccount) != 0 {
+		t.Fatalf("应为 2 台节点各生成一份: generated=%v byNode=%v byAccount=%v", generated, opts.UserDataByNode, opts.UserDataByAccount)
+	}
+	for _, name := range nodeNames {
+		e := generated[name]
+		if len(e.Password) != 24 || e.User != "root" {
+			t.Errorf("节点 %s 的凭据不符: %+v", name, e)
+		}
+		ud := opts.UserDataByNode[name]
+		if !strings.Contains(ud, "password: '"+e.Password+"'") {
+			t.Errorf("节点 %s 的 cloud-init 里不是它自己的密码:\n%s", name, ud)
+		}
+		if strings.Contains(ud, "fixed-pw") {
+			t.Errorf("账号的固定密码不应再注入新节点:\n%s", ud)
+		}
+	}
+	if generated[nodeNames[0]].Password == generated[nodeNames[1]].Password {
+		t.Error("两台节点的密码不应相同")
+	}
+}
+
+// 密码写法跟随提供商：公共镜像的 cloud-init 较老的提供商同时下发 list 写法。
+func TestProvisionChpasswdFollowsProvider(t *testing.T) {
+	p := pp([]config.Account{{Name: "a1", Provider: "tencent-cvm"}}, "a1")
+	opts := &fleet.Options{Clients: p.clients, Prefix: "vps", Region: "ap-beijing", Count: 1}
+	generated, err := injectPasswords(p, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "vps-a1-ap-beijing-01"
+	if ud := opts.UserDataByNode[name]; !strings.Contains(ud, "list: |\n    root:"+generated[name].Password+"\n") {
+		t.Errorf("tencent-cvm 应同时下发 list 写法:\n%s", ud)
+	}
+	p = pp([]config.Account{{Name: "a1", Provider: "digitalocean"}}, "a1")
+	opts = &fleet.Options{Clients: p.clients, Prefix: "vps", Region: "sgp1", Count: 1}
+	if _, err := injectPasswords(p, opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(opts.UserDataByNode["vps-a1-sgp1-01"], "list:") {
+		t.Error("digitalocean 的生成结果不应出现 list 写法")
+	}
+}
+
+// --no-password：不注入密码 ∧ 无 user-data ∧ 无 ssh-keys → fail-fast，指认账号与逃生门。
+func TestProvisionNoPasswordBareFailsFast(t *testing.T) {
+	p := pp([]config.Account{{Name: "a1"}}, "a1")
+	p.noPassword = true
+	opts := &fleet.Options{}
+	_, err := injectPasswords(p, opts)
 	if err == nil || !strings.Contains(err.Error(), "a1") || !strings.Contains(err.Error(), "--allow-bare") {
 		t.Fatalf("裸机应 fail-fast 并指认账号与逃生门：%v", err)
 	}
-}
-
-// --allow-bare 放行：不报错（警告走 stderr）。
-func TestInjectPasswordsBareAllowEscape(t *testing.T) {
-	cfg := cfgOf(config.Account{Name: "a1"})
-	if err := injectPasswords(cfg, clientsOf("a1"), "", nil, 0, false, nil, true, &fleet.Options{}); err != nil {
-		t.Fatalf("--allow-bare 应放行：%v", err)
+	p.allowBare = true
+	if generated, err := injectPasswords(p, opts); err != nil || len(generated) != 0 || len(opts.UserDataByNode) != 0 {
+		t.Fatalf("--allow-bare 应放行且什么都不注入：%v %v %v", err, generated, opts.UserDataByNode)
 	}
 }
 
-// 无密码账号 + 传 --user-data（D3 分叉路径）→ 不算裸机，不报错。
-func TestInjectPasswordlessWithUserDataNotBare(t *testing.T) {
-	cfg := cfgOf(config.Account{Name: "a1"})
-	opts := &fleet.Options{}
-	if err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, nil, false, opts); err != nil {
-		t.Fatalf("user-data 分叉不应报错：%v", err)
-	}
-	if len(opts.UserDataByAccount) != 0 {
-		t.Fatalf("无密码账号不应生成注入 cloud-init：%v", opts.UserDataByAccount)
-	}
-}
-
-// 无密码账号 + --ssh-keys → 不算裸机。
-func TestInjectPasswordlessWithSSHKeysNotBare(t *testing.T) {
-	cfg := cfgOf(config.Account{Name: "a1"})
-	if err := injectPasswords(cfg, clientsOf("a1"), "", []string{"12345"}, 0, false, nil, false, &fleet.Options{}); err != nil {
+// --no-password + --ssh-keys：不算裸机。
+func TestProvisionNoPasswordWithSSHKeysNotBare(t *testing.T) {
+	p := pp([]config.Account{{Name: "a1"}}, "a1")
+	p.noPassword, p.sshKeys = true, []string{"12345"}
+	if _, err := injectPasswords(p, &fleet.Options{}); err != nil {
 		t.Fatalf("ssh-keys 兜底不应报错：%v", err)
 	}
 }
 
-// 有密码账号 + --user-data 互斥报错（既有行为回归）。
-func TestInjectPasswordUserDataMutuallyExclusive(t *testing.T) {
-	cfg := cfgOf(config.Account{Name: "a1", SSHPassword: "pw"})
-	err := injectPasswords(cfg, clientsOf("a1"), "/tmp/ud.yaml", nil, 0, false, nil, false, &fleet.Options{})
-	if err == nil || !strings.Contains(err.Error(), "互斥") {
-		t.Fatalf("密码账号与 --user-data 同给应报互斥：%v", err)
+// --user-data：原样下发、不注入密码，无密码账号不算裸机。
+func TestProvisionUserDataNotBare(t *testing.T) {
+	p := pp([]config.Account{{Name: "a1"}}, "a1")
+	p.userDataPath = "/tmp/ud.yaml"
+	opts := &fleet.Options{}
+	generated, err := injectPasswords(p, opts)
+	if err != nil || len(generated) != 0 || len(opts.UserDataByNode) != 0 || len(opts.UserDataByAccount) != 0 {
+		t.Fatalf("user-data 路径不应生成任何注入：%v %v %v", err, generated, opts.UserDataByNode)
+	}
+}
+
+// 不注入密码时，配了固定密码的账号必须拦下——否则导出 NMS 载荷会带上机器上没有的密码。
+func TestProvisionNoInjectionRejectsFixedPassword(t *testing.T) {
+	for _, what := range []string{"--user-data", "--no-password"} {
+		p := pp([]config.Account{{Name: "a1"}, {Name: "a2", SSHPassword: "fixed-pw"}}, "a1", "a2")
+		if what == "--user-data" {
+			p.userDataPath = "/tmp/ud.yaml"
+		} else {
+			p.noPassword = true
+		}
+		p.allowBare = true // 裸机放行也不能放过这一条
+		_, err := injectPasswords(p, &fleet.Options{})
+		if err == nil || !strings.Contains(err.Error(), "互斥") || !strings.Contains(err.Error(), "a2") || !strings.Contains(err.Error(), what) {
+			t.Errorf("%s 与账号固定密码应报互斥并指认账号: %v", what, err)
+		}
 	}
 }
 

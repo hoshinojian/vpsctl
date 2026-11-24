@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
 	"github.com/hoshinojian/vpsctl/internal/nms"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -1039,5 +1041,157 @@ func TestOperationHistory(t *testing.T) {
 	}
 	if strings.Contains(string(body), "token") || strings.Contains(string(body), "password") {
 		t.Error("操作历史不应包含凭据字段")
+	}
+}
+
+// acctProvider 让假 provider 建出来的节点带上真实账号名（真 provider 都会带）。
+type acctProvider struct {
+	*fakeProvider
+	account string
+}
+
+func (p *acctProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Server, error) {
+	s, err := p.fakeProvider.Create(ctx, req)
+	s.Account = p.account
+	return s, err
+}
+
+// TestCreateStoresRandomPasswords：管理台建机给每台节点一个随机 root 密码并记入密码库
+// （每台的 cloud-init 里是它自己的那个密码，接口响应里不出现）；列表接口标出"有密码"；
+// 导出 NMS 载荷时逐台带上；销毁后记录清掉。
+func TestCreateStoresRandomPasswords(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, _ := ln.Accept()
+			if c == nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	fp := &fakeProvider{servers: []provider.Server{}}
+	s := New([]fleet.AccountClient{{Name: "a1", ProviderName: "digitalocean", Provider: &acctProvider{fp, "a1"}}},
+		&config.File{Accounts: []config.Account{{Name: "a1", Provider: "digitalocean", Token: "t1"}}},
+		filepath.Join(t.TempDir(), "accounts.json"))
+	s.probePort = ln.Addr().(*net.TCPAddr).Port
+	s.probeTimeout = 300 * time.Millisecond
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	code, out := postJSON(t, srv.URL+"/api/create", map[string]any{
+		"account": "a1", "count": 2, "region": "sgp1", "size": "s", "image": "i", "prefix": "vps",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d out=%v", code, out)
+	}
+	raw, _ := json.Marshal(out)
+	entries, err := nodepass.Open(s.passPath).Load()
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("密码库应记下 2 台: %v %v", entries, err)
+	}
+	fp.mu.Lock()
+	creates := append([]provider.CreateRequest(nil), fp.creates...)
+	fp.mu.Unlock()
+	passwords := map[string]string{} // 实例 ID → 密码库里的密码
+	for _, c := range creates {
+		e, ok := entries[nodepass.Key("a1", "id-"+c.Name)]
+		if !ok {
+			t.Fatalf("密码库里没有 %s: %v", c.Name, entries)
+		}
+		if !strings.Contains(c.UserData, e.Password) {
+			t.Errorf("节点 %s 的 cloud-init 里不是密码库记下的那个密码", c.Name)
+		}
+		if bytes.Contains(raw, []byte(e.Password)) {
+			t.Errorf("建机接口的响应里不应出现密码（节点 %s）", c.Name)
+		}
+		passwords["id-"+c.Name] = e.Password
+	}
+	if len(passwords) != 2 {
+		t.Fatalf("建机次数不符: %d", len(creates))
+	}
+	for id, pw := range passwords {
+		for other, opw := range passwords {
+			if id != other && pw == opw {
+				t.Error("两台节点的密码不应相同")
+			}
+		}
+	}
+
+	// 列表接口：标出"有密码"，但密码本身不回传
+	fp.mu.Lock()
+	fp.servers = []provider.Server{
+		{ID: "id-vps-a1-sgp1-01", Account: "a1", Name: "vps-a1-sgp1-01", IPv4Public: "127.0.0.1"},
+		{ID: "id-vps-a1-sgp1-02", Account: "a1", Name: "vps-a1-sgp1-02", IPv4Public: "127.0.0.1"},
+		{ID: "id-legacy", Account: "a1", Name: "vps-a1-sgp1-99", IPv4Public: "127.0.0.1"},
+	}
+	fp.mu.Unlock()
+	resp, err := http.Get(srv.URL + "/api/droplets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var listed listResponse
+	if err := json.Unmarshal(body, &listed); err != nil {
+		t.Fatal(err)
+	}
+	has := map[string]bool{}
+	for _, d := range listed.Droplets {
+		has[d.ID] = d.HasPassword
+	}
+	if !has["id-vps-a1-sgp1-01"] || !has["id-vps-a1-sgp1-02"] || has["id-legacy"] {
+		t.Errorf("has_password 应只对密码库里有记录的节点为真: %v", has)
+	}
+	for _, pw := range passwords {
+		if bytes.Contains(body, []byte(pw)) {
+			t.Error("列表接口的响应里不应出现密码")
+		}
+	}
+
+	// NMS 载荷：逐台带各自的随机密码，用户缺省 root
+	resp, err = http.Get(srv.URL + "/api/nms-payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload nms.Payload
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(payload.Nodes) != 3 {
+		t.Fatalf("nodes = %+v", payload.Nodes)
+	}
+	for _, n := range payload.Nodes {
+		var want string
+		for id, pw := range passwords {
+			if n.Name == strings.TrimPrefix(id, "id-") {
+				want = pw
+			}
+		}
+		if n.SSHPassword != want || n.SSHUser != "root" {
+			t.Errorf("节点 %s 的载荷凭据不符: %s/%s", n.Name, n.SSHUser, n.SSHPassword)
+		}
+	}
+
+	// 销毁成功 → 密码记录清掉
+	code, out = postJSON(t, srv.URL+"/api/delete", map[string]any{
+		"targets": []map[string]any{
+			{"account": "a1", "id": "id-vps-a1-sgp1-01"},
+			{"account": "a1", "id": "id-vps-a1-sgp1-02"},
+		},
+		"count": 2,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("delete status = %d out=%v", code, out)
+	}
+	entries, err = nodepass.Open(s.passPath).Load()
+	if err != nil || len(entries) != 0 {
+		t.Errorf("销毁后密码记录应清掉: %v %v", entries, err)
 	}
 }

@@ -1011,13 +1011,14 @@ function openDetails(d) {
   dtItem(g, '标签', (d.tags || []).join(' '), false);
   dtItem(g, 'SSH 用户（导出 NMS 用）', ai.ssh_user || 'root', false);
   const pw = $('dt-note');
-  if (ai.has_password) {
-    dtItem(g, 'SSH 密码', '已配置（导出载荷时携带）', false);
+  // 有密码可用 = 建机时生成的随机密码（记在本地密码库）或账号级配置；密码本身不回传浏览器
+  if (d.has_password || ai.has_password) {
+    dtItem(g, 'SSH 密码', '已配置（建机时生成的随机密码或账号密码；导出载荷时携带）', false);
     pw.textContent = '';
   } else {
     dtItem(g, 'SSH 密码', '未配置', false);
-    pw.textContent = '该账号未配置 SSH 密码：导出 NMS 载荷时此节点会被 NMS 拒绝（密码必填），'
-      + '可在「账号…」里补配后重新导出。';
+    pw.textContent = '这台节点没有可用的 SSH 密码（建机时没有生成随机密码，账号也没配置）：'
+      + '导出 NMS 载荷时会被 NMS 拒绝（密码必填）。';
   }
   $('modal-detail').hidden = false;
 }

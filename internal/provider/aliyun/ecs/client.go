@@ -104,6 +104,8 @@ func init() {
 		}
 		return New(account, cred.AccessKey, cred.SecretKey, hc), nil
 	})
+	// 公共镜像的 cloud-init 版本不一（老镜像不认 chpasswd.users）：密码要兼容老写法下发
+	provider.RegisterChpasswdCompat(ProviderName)
 }
 
 // call 发起一次地域内的 ECS 调用。

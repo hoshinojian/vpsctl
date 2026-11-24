@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -84,7 +85,7 @@ func runDelete(args []string) error {
 		return err
 	}
 
-	cfg, _, err := loadAccounts(*accounts)
+	cfg, cfgPath, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
@@ -110,6 +111,10 @@ func runDelete(args []string) error {
 		return err
 	}
 	res := fleet.DeleteBatch(ctx, clients, targets, fleet.DeleteOptions{ShutdownFirst: *shutdownFirst})
+	// 节点已销毁：建机时生成的随机密码记录一并清掉（清不掉只告警，不影响删除结果）
+	if err := nodepass.Open(nodepass.PathFor(cfgPath)).ForgetAll(okTargets(res)); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 清理密码库失败: %v\n", err)
+	}
 	if err := printJSON(res, *output); err != nil {
 		return err
 	}

@@ -36,6 +36,9 @@ type Options struct {
 	UserData   string   // cloud-init 脚本，可空（全部账号共用）
 	// UserDataByAccount 账号专属 user-data（如账号级密码注入），存在时优先于 UserData。
 	UserDataByAccount map[string]string
+	// UserDataByNode 节点专属 user-data（键为节点名，如每台一个随机密码），存在时优先于
+	// UserDataByAccount 与 UserData。
+	UserDataByNode map[string]string
 	// SSHPort 是建机时注入的 sshd 监听端口（0/22 = 不动缺省）。非缺省时写进
 	// 自动生成的 cloud-init（见 CloudInit），并回填进结果 JSON 的 ssh_port，
 	// 供 NMS 导入载荷逐节点取用。
@@ -107,6 +110,12 @@ func NextStartIndex(servers []provider.Server, prefix, account, region string) i
 	return max + 1
 }
 
+// NamesFor 返回某个账号在本批里要创建的节点名；Plan、建机与建机前的置备（随机密码）
+// 都从这里取，保证是同一套命名。
+func (o Options) NamesFor(account string) []string {
+	return Names(o.Prefix, account, o.Region, o.startIndex(), o.Count)
+}
+
 // Names 生成单账号的节点名序列：{prefix}-{account}-{region}-{NN}。
 // region 进名是为了跨区域批次天然不重名——NMS 以名字作节点 id，同账号
 // 跨区域同名会导致载荷重复 id 被整单拒绝（NMS2 pitfalls P69）。
@@ -127,13 +136,21 @@ func Plan(o Options) ([]PlanEntry, error) {
 	// P75：user-data 按**字节**拦截非 ASCII（DO 链路 latin-1 roundtrip 二次编码
 	// 产生控制字符毁掉 cloud-init；合法 UTF-8 照样中招）。覆盖两条路，开工前全预检。
 	precheck := func() error {
-		userData := o.UserData
 		for _, ac := range o.Clients {
+			uds := []string{o.UserData}
 			if ud, ok := o.UserDataByAccount[ac.Name]; ok {
-				userData = ud
+				uds = []string{ud}
 			}
-			if err := checkASCII(userData, ac.Name); err != nil {
-				return err
+			// 按节点的 user-data 各查各的（同账号每台可能不一样，如随机密码）
+			for _, name := range o.NamesFor(ac.Name) {
+				if ud, ok := o.UserDataByNode[name]; ok {
+					uds = append(uds, ud)
+				}
+			}
+			for _, ud := range uds {
+				if err := checkASCII(ud, ac.Name); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -146,7 +163,7 @@ func Plan(o Options) ([]PlanEntry, error) {
 			Account:  ac.Name,
 			Provider: ac.ProviderName,
 			Count:    o.Count,
-			Names:    Names(o.Prefix, ac.Name, o.Region, o.startIndex(), o.Count),
+			Names:    o.NamesFor(ac.Name),
 		})
 	}
 	return entries, nil
@@ -242,7 +259,7 @@ type acctOut struct {
 
 func createAccount(ctx context.Context, o Options, ac AccountClient, batch string) acctOut {
 	out := acctOut{}
-	names := Names(o.Prefix, ac.Name, o.Region, o.startIndex(), o.Count)
+	names := o.NamesFor(ac.Name)
 	sem := make(chan struct{}, o.concurrency())
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -255,6 +272,9 @@ func createAccount(ctx context.Context, o Options, ac AccountClient, batch strin
 
 			userData := o.UserData
 			if ud, ok := o.UserDataByAccount[ac.Name]; ok {
+				userData = ud
+			}
+			if ud, ok := o.UserDataByNode[name]; ok {
 				userData = ud
 			}
 			s, err := ac.Provider.Create(ctx, provider.CreateRequest{

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
 	"github.com/hoshinojian/vpsctl/internal/nms"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
 )
 
 // nodeEntry 是 list 输出的单台节点（在结果 JSON 形态上补 provider 名）。
@@ -52,7 +54,7 @@ func runNodeList(args []string) error {
 		return fmt.Errorf("未知格式 %q（可选 json | nms）", *format)
 	}
 
-	cfg, _, err := loadAccounts(*accounts)
+	cfg, cfgPath, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
@@ -72,7 +74,7 @@ func runNodeList(args []string) error {
 	defer stop()
 	switch *format {
 	case "nms":
-		return printNMS(ctx, cfg, clients, entries, *output, !*noCheckSSH, *sshPort)
+		return printNMS(ctx, cfgPath, cfg, entries, *output, !*noCheckSSH, *sshPort)
 	default:
 		res := listResult{Droplets: entries}
 		for _, e := range errs {
@@ -148,31 +150,35 @@ func hasTag(tags []string, want string) bool {
 }
 
 // printNMS 渲染并输出 NMS 导入载荷：无公网 IPv4 的节点跳过（NMS 校验
-// management_ip 必填），凭据缺密码时告警（导入会被 04 §2.2 必填校验拒绝）。
-// sshPort 同时用于载荷 ssh_port 字段与连通性预检（高位口 fleet 单源）。
-func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClient, entries []nodeEntry, output string, checkSSH bool, sshPort int) error {
+// management_ip 必填），没有可用 SSH 密码的节点告警（导入会被 04 §2.2 必填校验拒绝）。
+// 密码逐台取：vpsctl 建机时生成的随机密码优先，没有记录的（存量节点）回落到账号级
+// ssh_password。sshPort 同时用于载荷 ssh_port 字段与连通性预检。
+func printNMS(ctx context.Context, cfgPath string, cfg *config.File, entries []nodeEntry, output string, checkSSH bool, sshPort int) error {
 	byName := make(map[string]config.Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		byName[a.Name] = a
 	}
-	accts := make(map[string]nms.Account, len(clients))
-	for _, c := range clients {
-		a := byName[c.Name]
-		accts[c.Name] = nms.Account{Provider: a.Provider, SSHUser: a.SSHUser, SSHPassword: a.SSHPassword}
+	accts := make(map[string]nms.Account, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		accts[a.Name] = nms.Account{Provider: a.Provider, SSHUser: a.SSHUser, SSHPassword: a.SSHPassword}
 	}
 
+	stored, err := nodepass.Open(nodepass.PathFor(cfgPath)).Load()
+	if err != nil {
+		return err
+	}
+	nodePass := func(account, id string) (string, string, bool) {
+		e, ok := stored[nodepass.Key(account, id)]
+		return e.User, e.Password, ok
+	}
 	var (
 		keep    []fleet.ServerJSON
 		skipped []string
-		noPass  = map[string]bool{}
 	)
 	for _, e := range entries {
 		if e.IPv4Public == "" {
 			skipped = append(skipped, e.Name)
 			continue
-		}
-		if byName[e.Account].SSHPassword == "" {
-			noPass[e.Account] = true
 		}
 		keep = append(keep, e.ServerJSON)
 	}
@@ -196,8 +202,16 @@ func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClie
 		}
 		keep = filtered
 	}
-	for acct := range noPass {
-		fmt.Fprintf(os.Stderr, "警告: 账号 %s 未配置 ssh_password，导入 NMS 会被拒绝（04 §2.2 必填）；请在 accounts.json 该账号补上后重新导出\n", acct)
+	// 留到连通性预检之后再点名：预检跳过的节点本来就不在载荷里
+	var noPass []string
+	for _, sv := range keep {
+		if _, pw := nodePassword(byName, nodePass, sv); pw == "" {
+			noPass = append(noPass, sv.Name)
+		}
+	}
+	if len(noPass) > 0 {
+		fmt.Fprintf(os.Stderr, "警告: 以下 %d 台节点没有 SSH 密码（没有建机时生成的随机密码记录，账号也没配 ssh_password），导入 NMS 会被拒绝（04 §2.2 必填）: %s\n",
+			len(noPass), strings.Join(noPass, ", "))
 	}
 	if len(keep) == 0 {
 		fmt.Fprintln(os.Stderr, "没有可导出的节点")
@@ -206,7 +220,7 @@ func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClie
 		fmt.Fprintln(os.Stderr, "注意: 导出文件含明文 SSH 密码，已按 600 权限写入，勿提交进任何仓库")
 	}
 
-	payload := nms.Payload{Nodes: nms.Nodes(keep, accts, sshPort)}
+	payload := nms.Payload{Nodes: nms.Nodes(keep, accts, sshPort, nodePass)}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
@@ -219,4 +233,20 @@ func printNMS(ctx context.Context, cfg *config.File, clients []fleet.AccountClie
 		return nil
 	}
 	return os.WriteFile(output, data, 0o600)
+}
+
+// nodePassword 取一台节点导出载荷时该用的凭据：建机时生成的随机密码优先，没有记录
+// （存量节点、别的工具建的）回落到账号级配置。
+func nodePassword(byName map[string]config.Account, nodePass nms.NodePassword, s fleet.ServerJSON) (user, password string) {
+	a := byName[s.Account]
+	user, password = a.SSHUser, a.SSHPassword
+	if nodePass != nil {
+		if u, pw, ok := nodePass(s.Account, s.ID); ok {
+			password = pw
+			if u != "" {
+				user = u
+			}
+		}
+	}
+	return
 }
