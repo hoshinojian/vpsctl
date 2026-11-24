@@ -2,15 +2,14 @@ package cvm
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/provider"
+	"github.com/hoshinojian/vpsctl/internal/provider/tencent"
 )
 
 // create.go：建机。按量计费（与 DO 的按小时同语义），落在该地域的默认 VPC 与
@@ -84,7 +83,7 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 			params["DryRun"] = true
 		} else {
 			// 幂等令牌：客户端遇 5xx 重试时同一个令牌不会重复开机
-			params["ClientToken"] = clientToken(req.Name)
+			params["ClientToken"] = tencent.ClientToken(req.Name)
 		}
 		return params
 	}
@@ -226,20 +225,4 @@ func hostName(name string) string {
 		return ""
 	}
 	return name
-}
-
-// clientToken 生成幂等令牌：节点名片段 + 随机串，≤64 个 ASCII 字符。
-func clientToken(name string) string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	prefix := make([]byte, 0, 32)
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			prefix = append(prefix, byte(r))
-		}
-		if len(prefix) == 32 {
-			break
-		}
-	}
-	return "vpsctl-" + string(prefix) + "-" + hex.EncodeToString(b[:])
 }

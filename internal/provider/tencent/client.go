@@ -3,6 +3,8 @@ package tencent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -228,4 +230,21 @@ func retryDelay(attempt int) time.Duration {
 
 func snippet(b []byte) string {
 	return strings.TrimSpace(string(b[:min(len(b), 1024)]))
+}
+
+// ClientToken 生成幂等令牌：名字片段 + 随机串，≤64 个 ASCII 字符。客户端遇 5xx 重试时
+// 同一个令牌不会被平台当成两次购买——对建一次就付一个月的产品尤其要紧。
+func ClientToken(name string) string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	prefix := make([]byte, 0, 32)
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			prefix = append(prefix, byte(r))
+		}
+		if len(prefix) == 32 {
+			break
+		}
+	}
+	return "vpsctl-" + string(prefix) + "-" + hex.EncodeToString(b[:])
 }

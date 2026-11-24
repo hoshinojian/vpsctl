@@ -39,10 +39,18 @@ type Server struct {
 	IPv4Private string //
 	Tags        []string
 	CreatedAt   time.Time
+	// ExpiresAt 是包年包月节点的到期时间（按量节点为零值，不出现在 JSON 里）。
+	ExpiresAt time.Time
 	// Lat/Lng 是节点所在地理坐标（等距投影用）。提供商 API 通常不直接返回，
 	// 由各实现在 toServer 里按 region slug 从静态映射表填写；未知 slug 为 0。
 	Lat float64
 	Lng float64
+}
+
+// Login 是给节点注入的登录凭据（vpsctl 建机时生成的随机 root 密码）。
+type Login struct {
+	User     string // 缺省 root
+	Password string
 }
 
 // CreateRequest 描述一次创建请求。
@@ -53,8 +61,16 @@ type CreateRequest struct {
 	Image      string
 	SSHKeys    []string // ID / 指纹 / 名称混填，由实现自行解析
 	Tags       []string
-	UserData   string // cloud-init 脚本，可空
+	UserData   string // cloud-init 脚本，可空；与 Login 是同一份凭据的两种载体
 	Monitoring bool
+	// Login 是 UserData 里那份密码的结构化形式：走 cloud-init 的实现用 UserData，没有
+	// 用户数据通道、只能靠平台接口设密码的实现（轻量应用服务器）用 Login。都不给就是
+	// 用户自己用 --user-data 置备。
+	Login Login
+	// 以下三项只经 cloud-init 落地；没有 cloud-init 的实现遇到非零值要明确拒绝。
+	SSHPort        int // 建机注入的 sshd 监听端口（0/22 = 缺省）
+	Tunnel443      bool
+	AuthorizedKeys []string
 }
 
 // ActionRef 指向一次异步操作的句柄，用于轮询。
@@ -126,6 +142,12 @@ type Credentials struct {
 	Token     string
 	AccessKey string // 腾讯云 SecretId / 阿里云 AccessKey ID
 	SecretKey string // 腾讯云 SecretKey / 阿里云 AccessKey Secret
+}
+
+// Prechecker 是可选能力：建机前让提供商做一次不落地的预检（云厂商的 DryRun）。参数、
+// 库存、余额这类建机才会暴露的问题在这里就报出来，对建一次就付一个月的产品尤其要紧。
+type Prechecker interface {
+	Precheck(ctx context.Context, req CreateRequest) error
 }
 
 // Factory 按账号名与凭据构造客户端；hc 为 nil 时用默认 http.Client。

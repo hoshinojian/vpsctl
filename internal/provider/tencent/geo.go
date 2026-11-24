@@ -1,9 +1,9 @@
-package cvm
+package tencent
 
-// geo.go：腾讯云地域 → 粗略坐标（等距投影用）。CVM API 不返回坐标，只能静态
-// 映射；未知地域缺省为 0，前端按"未定位"处理。
+// geo.go：腾讯云地域 → 粗略坐标（等距投影用）。API 不返回坐标，只能静态映射；未知
+// 地域缺省为 0，前端按"未定位"处理。云服务器与轻量应用服务器共用。
 //
-// 地域 ID 与城市的对应关系取自 DescribeRegions 返回的 RegionName（2026-11-24
+// 地域 ID 与城市的对应关系取自两家产品线 DescribeRegions 返回的地域名（2026-11-24
 // 实测），不要凭印象增补——新增地域时先到该接口核对。
 
 type geoPoint struct{ lat, lng float64 }
@@ -34,4 +34,10 @@ var regionGeo = map[string]geoPoint{
 	"na-siliconvalley": {37.77, -122.42}, // 美国西部(硅谷)
 	"na-ashburn":       {39.04, -77.49},  // 美国东部(弗吉尼亚)
 	"sa-saopaulo":      {-23.55, -46.63}, // 南美地区(圣保罗)
+}
+
+// RegionGeo 返回地域的粗略坐标；未知地域返回 false。
+func RegionGeo(region string) (lat, lng float64, ok bool) {
+	g, ok := regionGeo[region]
+	return g.lat, g.lng, ok
 }
