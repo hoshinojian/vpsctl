@@ -1,8 +1,8 @@
 # vpsctl
 
 跨 VPS 提供商的节点供给/回收小工具。Go 单二进制、零第三方依赖；多账号配置驱动；
-本地 Web 管理台；当前支持 **DigitalOcean、腾讯云 CVM、阿里云 ECS**（三家都按量计费、随建随删），
-后续按同一 Provider 接口继续扩展。
+本地 Web 管理台；当前支持 **DigitalOcean、腾讯云 CVM、阿里云 ECS**（三家都按量计费、随建随删）与
+**腾讯云轻量应用服务器**（包年包月），后续按同一 Provider 接口继续扩展。
 
 > **凭据安全（本仓库为 public）**：真实 API token 只放本地
 > `~/.config/vpsctl/accounts.json`（建议 600 权限）和节点密码库
@@ -78,6 +78,7 @@ vpsctl create \
 | `--no-password` | 什么都不注入（缺省每台节点一个随机 root 密码并记入本地密码库） |
 | `--wait 300s` | 等待节点 active 且公网 IPv4 就绪（轮询）；0 不等待 |
 | `--dry-run` | 只打印创建计划，不调任何 API |
+| `--check` | 只做建机前的提供商预检（云厂商的 DryRun），不创建任何资源 |
 | `--output` | 结果 JSON 另存路径（stdout 始终输出） |
 
 - 多账号并行、账号内并发受限（4），逐台记录成败；**部分失败时 JSON 照常完整输出、退出码 1**
@@ -240,6 +241,7 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
   改配完成后平台还要收尾一小会儿，这期间的开机请求 vpsctl 会自动等待重试
 - **重装**是 关机 → 重装系统盘 → 开机，保留实例 ID / 公网 IP。镜像是否适配机型只能由平台判定：
   建机时 `DryRun` 预检会拦下；重装时才被拒的话系统盘不会动，实例会恢复开机
+- **建机前可先 `--check`**：只做提供商预检（云厂商的 DryRun），不创建任何资源
 - **一次未复现的故障留档**：腾讯云有一台测试机在"重装完成约 30 秒后改配"之后 22 端口被拒
   （实例显示运行中、能 ping 通），关机再开机无效，重装后恢复；之后 4 次相同或相近的操作都正常，
   原因未查明。遇到类似情况先用 `vpsctl rebuild` 恢复
@@ -259,6 +261,38 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
   `QCloudFinanceFullAccess`，否则报
   `UnauthorizedOperation: Since you have no payment rights and cannot complete the payment`。
   这一条 `DryRun` 预检发现不了（预检会通过，真下单才被拒）
+
+## 腾讯云轻量应用服务器（`tencent-lighthouse`）
+
+**包年包月**：建一次就付一个月，到期自动续费。和 DO 那种"按小时、随建随删"是两种用法——
+适合长期在线的节点，不适合做实验。阿里云轻量应用服务器暂未支持（它的 OpenAPI 没有公开的
+销毁接口，也没有关闭自动续费的接口，做不了"跟 DO 一样"）。
+
+```sh
+vpsctl sizes  --only lh-1                        # 套餐自带月价（广州 2 核 2G 约 ¥35–55/月）
+vpsctl images --only lh-1                        # 镜像 slug 与云服务器同一套（ubuntu-24.04…）
+vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03 \
+  --image ubuntu-24.04 --count 1 --check         # 先只预检，不花钱
+vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03 \
+  --image ubuntu-24.04 --count 1 --wait 300s     # 真建：付一个月，自动续费
+```
+
+- **`--size` 是套餐 ID**（`vpsctl sizes` 可查），不是机型名；区域可以是地域或可用区
+- **每次建机先发一遍预检**（平台的 DryRun），参数 / 库存 / 余额的问题在扣费前报出来；
+  `--check` 只走到这一步
+- **只能升配、不能降配**：`resize` 换更贵的套餐；`--resize-disk` 报错（要更大的盘选磁盘更大的套餐）
+- **停机**：`vpsctl delete`（销毁，退款按平台的退还规则走）。不想续费了也可以先在控制台
+  关掉自动续费
+- **不支持靠 cloud-init 的置备**：自定义 `--user-data`、高位口（`--ssh-port`）、443 隧道、
+  `--authorized-keys` 都会在建机前被明确拒绝；登录密钥用 `--ssh-keys`
+- **随机 root 密码走平台的"登录密码"**：平台的密码落在镜像的默认用户上（Ubuntu 是
+  `ubuntu`），root 默认禁止 SSH 登录。所以建机时顺带下发一条平台自动执行的命令，等默认
+  用户的密码落盘后把**密码哈希**复制给 root 并打开 root 密码登录——命令会留在平台的命令
+  记录里，所以里面不出现明文密码
+
+> **这一节的真机验证还没做。** 建机预检、地域 / 套餐 / 镜像 / 密钥对查询、全部读写接口的
+> 鉴权都在真实账号上过了；但建机之后的流程（平台自动执行的命令是否真能把 root 打开、
+> 开关机、重装、升配、销毁）只有单元测试，没有在真机上跑过——建一台就要付一个月。
 
 ## 扩展新提供商
 

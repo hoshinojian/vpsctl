@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"slices"
 	"strings"
 	"testing"
 
@@ -223,5 +224,43 @@ func TestResolveStartIndexListFailFast(t *testing.T) {
 	_, err := resolveStartIndex(context.Background(), cl, newCreateFS(t), 1, "vps", "sgp1")
 	if err == nil || !strings.Contains(err.Error(), "a1") || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("List 失败应 fail-fast 并指认账号: %v", err)
+	}
+}
+
+// fakePrechecker 只实现建机前预检；其余 Provider 方法不该被调用（内嵌 nil 接口兜底）。
+type fakePrechecker struct {
+	provider.Provider
+	err  error
+	seen []provider.CreateRequest
+}
+
+func (f *fakePrechecker) Precheck(_ context.Context, req provider.CreateRequest) error {
+	f.seen = append(f.seen, req)
+	return f.err
+}
+
+// precheck 只查有预检能力的提供商，查的是将要真发的请求；没有预检能力的如实标为跳过。
+func TestPrecheck(t *testing.T) {
+	good := &fakePrechecker{}
+	clients := []fleet.AccountClient{
+		{Name: "a1", Provider: good},
+		{Name: "a2", Provider: &fakeLister{}},
+	}
+	opts := &fleet.Options{Prefix: "vps", Region: "sgp1", Size: "s", Image: "i", Count: 1}
+	res, err := precheck(context.Background(), clients, opts, "b1")
+	if err != nil {
+		t.Fatalf("precheck: %v", err)
+	}
+	if len(good.seen) != 1 || good.seen[0].Name != "vps-a1-sgp1-01" || !slices.Equal(good.seen[0].Tags, []string{"batch:b1"}) {
+		t.Errorf("预检应查将要真发的请求: %+v", good.seen)
+	}
+	if res["created"] != 0 || !slices.Equal(res["passed"].([]string), []string{"a1"}) || !slices.Equal(res["skipped"].([]string), []string{"a2"}) {
+		t.Errorf("预检结果不符: %v", res)
+	}
+
+	bad := &fakePrechecker{err: errors.New("库存不足")}
+	if _, err := precheck(context.Background(), []fleet.AccountClient{{Name: "a1", Provider: bad}}, opts, "b1"); err == nil ||
+		!strings.Contains(err.Error(), "a1") || !strings.Contains(err.Error(), "库存不足") {
+		t.Errorf("预检不过应指认账号并带出原因: %v", err)
 	}
 }

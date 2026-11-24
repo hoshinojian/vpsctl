@@ -34,6 +34,7 @@ func runCreate(args []string) error {
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
 	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
+	checkOnly := fs.Bool("check", false, "只做建机前的提供商预检（云厂商的 DryRun），不创建任何资源；提供商没有预检能力的账号会跳过")
 	noPassword := fs.Bool("no-password", false, "不注入密码（缺省给每台节点生成一个随机 root 密码，记入账号配置旁边的 node-passwords.json）")
 	allowBare := fs.Bool("allow-bare", false, "放行「不注入密码且无 user-data/ssh-keys」的裸机创建（缺省 fail-fast，防 P81 裸机交付）")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
@@ -104,6 +105,15 @@ func runCreate(args []string) error {
 		return err
 	}
 
+	if *checkOnly {
+		ctxCheck, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		res, err := precheck(ctxCheck, clients, &opts, fleet.BatchTag(time.Now()))
+		if err != nil {
+			return err
+		}
+		return printJSON(res, *output)
+	}
 	if *dryRun {
 		plan, err := fleet.Plan(opts)
 		if err != nil {
@@ -248,4 +258,27 @@ func printJSON(v any, path string) error {
 		return nil
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+// precheck 逐个账号做建机前的不落地预检（提供商的 DryRun）：查的是将要真发的那份
+// 请求。任一账号不过就报错停下；没有预检能力的提供商标为跳过，不假装查过。
+func precheck(ctx context.Context, clients []fleet.AccountClient, opts *fleet.Options, batch string) (map[string]any, error) {
+	checked, skipped := []string{}, []string{}
+	for _, ac := range clients {
+		pc, ok := ac.Provider.(provider.Prechecker)
+		if !ok {
+			skipped = append(skipped, ac.Name)
+			continue
+		}
+		names := opts.NamesFor(ac.Name)
+		if len(names) == 0 {
+			continue
+		}
+		if err := pc.Precheck(ctx, opts.RequestFor(ac, names[0], batch)); err != nil {
+			return nil, fmt.Errorf("账号 %s 预检未通过: %w", ac.Name, err)
+		}
+		checked = append(checked, ac.Name)
+	}
+	fmt.Fprintf(os.Stderr, "预检通过: %v；无预检能力（跳过）: %v\n", checked, skipped)
+	return map[string]any{"check": true, "passed": checked, "skipped": skipped, "created": 0}, nil
 }

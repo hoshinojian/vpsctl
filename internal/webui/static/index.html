@@ -413,7 +413,7 @@ const REGION_CITY = {
   'ap-chengdu':'Chengdu', 'ap-chongqing':'Chongqing', 'ap-hongkong':'Hong Kong',
   'ap-johorbahru':'Johor Bahru', 'ap-bangkok':'Bangkok', 'ap-jakarta':'Jakarta',
   'ap-seoul':'Seoul', 'ap-tokyo':'Tokyo', 'ap-osaka':'Osaka',
-  'me-saudi-arabia':'Riyadh', 'eu-frankfurt':'Frankfurt',
+  'me-saudi-arabia':'Riyadh', 'eu-frankfurt':'Frankfurt', 'ap-singapore':'Singapore',
   'na-queretaro':'Queretaro', 'na-siliconvalley':'Silicon Valley', 'na-ashburn':'Ashburn', 'sa-saopaulo':'Sao Paulo',
   // 阿里云 ECS 地域
   'cn-qingdao':'Qingdao', 'cn-beijing':'Beijing', 'cn-zhangjiakou':'Zhangjiakou', 'cn-huhehaote':'Hohhot',
@@ -1008,6 +1008,8 @@ function openDetails(d) {
   dtItem(g, '私网 IPv4', d.ipv4_private);
   dtItem(g, '月费', d.price_monthly ? signOf(currOf(d)) + d.price_monthly.toFixed(2) : '');
   dtItem(g, '创建时间', d.created_at ? new Date(d.created_at).toLocaleString() : '', false);
+  // 包年包月的节点（轻量应用服务器）带到期时间；按量节点没有
+  dtItem(g, '到期时间', d.expires_at ? new Date(d.expires_at).toLocaleString() + '（到期自动续费）' : '', false);
   dtItem(g, '标签', (d.tags || []).join(' '), false);
   dtItem(g, 'SSH 用户（导出 NMS 用）', ai.ssh_user || 'root', false);
   const pw = $('dt-note');

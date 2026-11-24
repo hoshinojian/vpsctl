@@ -23,6 +23,12 @@
       "provider": "aliyun-ecs",
       "access_key": "REPLACE_ME_ALIYUN_ACCESS_KEY_ID",
       "secret_key": "REPLACE_ME_ALIYUN_ACCESS_KEY_SECRET"
+    },
+    {
+      "name": "lh-1",
+      "provider": "tencent-lighthouse",
+      "access_key": "REPLACE_ME_TENCENT_SECRET_ID",
+      "secret_key": "REPLACE_ME_TENCENT_SECRET_KEY"
     }
   ]
 }
