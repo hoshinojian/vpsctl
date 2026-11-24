@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
 func writeAccounts(t *testing.T, content string, perm os.FileMode) string {
@@ -56,6 +58,8 @@ func TestLoadErrors(t *testing.T) {
 		{"空 accounts", `{}`, "accounts 为空"},
 		{"缺 token", `{"accounts":[{"name":"a","provider":"digitalocean"}]}`, "缺少 token"},
 		{"缺 provider", `{"accounts":[{"name":"a","token":"t"}]}`, "缺少 provider"},
+		{"密钥对只给 access_key", `{"accounts":[{"name":"a","provider":"tencent-cvm","access_key":"AKID"}]}`, "缺少 secret_key"},
+		{"密钥对只给 secret_key", `{"accounts":[{"name":"a","provider":"aliyun-ecs","secret_key":"s"}]}`, "缺少 access_key"},
 		{"重名", `{"accounts":[{"name":"a","provider":"p","token":"t"},{"name":"a","provider":"p","token":"t"}]}`, "重复"},
 	}
 	for _, tc := range cases {
@@ -85,6 +89,45 @@ func TestLoadSSHCredentials(t *testing.T) {
 	// 可选字段缺省为空，不报错
 	if f.Accounts[1].SSHUser != "" || f.Accounts[1].SSHPassword != "" {
 		t.Errorf("未配置凭据应为空: %+v", f.Accounts[1])
+	}
+}
+
+// TestKeyPairCredentials：密钥对型账号（腾讯云/阿里云）不填 token 也合法，凭据经
+// Credentials() 原样交给提供商；落盘时各写各的字段，不串也不多出空键。
+func TestKeyPairCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	in := &File{Accounts: []Account{
+		{Name: "do-1", Provider: "digitalocean", Token: "dop_v1_x"},
+		{Name: "tc-1", Provider: "tencent-cvm", AccessKey: "AKIDexample", SecretKey: "tc-secret"},
+		{Name: "ali-1", Provider: "aliyun-ecs", AccessKey: "LTAIexample", SecretKey: "ali-secret", SSHUser: "root", SSHPassword: "pw"},
+	}}
+	if err := Save(path, in); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"access_key": ""`) || strings.Contains(string(raw), `"token": ""`) {
+		t.Errorf("落盘不应出现空的凭据键: %s", raw)
+	}
+
+	out, warns, err := Load(path)
+	if err != nil || len(warns) != 0 {
+		t.Fatalf("Load: %v warns=%v", err, warns)
+	}
+	want := []provider.Credentials{
+		{Token: "dop_v1_x"},
+		{AccessKey: "AKIDexample", SecretKey: "tc-secret"},
+		{AccessKey: "LTAIexample", SecretKey: "ali-secret"},
+	}
+	for i, a := range out.Accounts {
+		if got := a.Credentials(); got != want[i] {
+			t.Errorf("账号 %s Credentials() = %+v, want %+v", a.Name, got, want[i])
+		}
+	}
+	if out.Accounts[2].SSHUser != "root" || out.Accounts[2].SSHPassword != "pw" {
+		t.Errorf("密钥对账号的 SSH 凭据未保留: %+v", out.Accounts[2])
 	}
 }
 

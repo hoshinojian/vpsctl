@@ -31,7 +31,7 @@ func loadAccounts(pathOverride string) (*config.File, string, error) {
 func buildClients(cfg *config.File) ([]fleet.AccountClient, error) {
 	clients := make([]fleet.AccountClient, 0, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
-		p, err := provider.New(a.Provider, a.Name, a.Token, nil)
+		p, err := provider.New(a.Provider, a.Name, a.Credentials(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("账号 %s: %w", a.Name, err)
 		}

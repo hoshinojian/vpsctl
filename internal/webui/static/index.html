@@ -247,7 +247,7 @@ tbody td { font-size: 13px; }
   <div class="modal">
     <h2>确认彻底删除</h2>
     <p>删除即<b style="color:var(--danger)">销毁磁盘、停止计费、不可恢复</b>。
-      共 <b id="del-count">0</b> 台，释放月费 $<span id="del-cost">0.00</span>：</p>
+      共 <b id="del-count">0</b> 台，释放月费 <span id="del-cost">$0.00</span>：</p>
     <div class="dellist" id="del-list"></div>
     <label class="opt"><input type="checkbox" id="del-shutdown">
       先优雅关机再删除（关机未完成则不删，宁可漏删）</label>
@@ -305,8 +305,14 @@ tbody td { font-size: 13px; }
       <label>提供商
         <select id="ac-provider"></select>
       </label>
-      <label style="grid-column:1/-1">API Token（编辑时留空 = 不变）
+      <label id="ac-token-row" style="grid-column:1/-1">API Token（DigitalOcean；编辑时留空 = 不变）
         <input id="ac-token" type="password" autocomplete="new-password">
+      </label>
+      <label id="ac-key-row" style="display:none">AccessKey ID（腾讯云 SecretId / 阿里云 AccessKey ID；编辑时留空 = 不变）
+        <input id="ac-accesskey" class="mono" autocomplete="off">
+      </label>
+      <label id="ac-secret-row" style="display:none">Secret（腾讯云 SecretKey / 阿里云 AccessKey Secret；编辑时留空 = 不变）
+        <input id="ac-secretkey" type="password" autocomplete="new-password">
       </label>
       <label>SSH 用户（留空 = root）
         <input id="ac-sshuser" autocomplete="off">
@@ -389,8 +395,11 @@ let allAccounts = [];        // 配置文件里的全部账号名（含 0 台的
 const selected = new Set();  // "account/id"
 const key = d => d.account + '/' + d.id;  // 节点唯一键（勾选状态与地图分组共用）
 let accountInfo = {};        // account -> {ssh_user, has_password, provider}
+let keyPairProviders = [];  // 凭据是 AccessKey + Secret（而不是单个 Token）的提供商名
 let toastTimer = null;
-let pendingOps = false;      // 有节点处于 new/进行中 → 快轮询
+let pendingOps = false;      // 有节点未到稳定态 → 快轮询
+// 稳定态之外（DO 的 new；腾讯云 / 阿里云的 stopping / starting / pending…）都算"进行中"
+const SETTLED_STATUS = new Set(['active', 'running', 'off', 'archive', 'error']);
 let pollTimer = null;
 
 // region slug → 城市可读名（与数据库/API 的 region 保持一致，纯展示用）。
@@ -399,8 +408,42 @@ const REGION_CITY = {
   sfo1:'San Francisco', sfo2:'San Francisco', sfo3:'San Francisco',
   ams2:'Amsterdam', ams3:'Amsterdam', lon1:'London', fra1:'Frankfurt',
   blr1:'Bangalore', sgp1:'Singapore', syd1:'Sydney', tor1:'Toronto',
+  // 腾讯云 CVM 地域
+  'ap-beijing':'Beijing', 'ap-shanghai':'Shanghai', 'ap-nanjing':'Nanjing', 'ap-guangzhou':'Guangzhou',
+  'ap-chengdu':'Chengdu', 'ap-chongqing':'Chongqing', 'ap-hongkong':'Hong Kong',
+  'ap-johorbahru':'Johor Bahru', 'ap-bangkok':'Bangkok', 'ap-jakarta':'Jakarta',
+  'ap-seoul':'Seoul', 'ap-tokyo':'Tokyo', 'ap-osaka':'Osaka',
+  'me-saudi-arabia':'Riyadh', 'eu-frankfurt':'Frankfurt',
+  'na-queretaro':'Queretaro', 'na-siliconvalley':'Silicon Valley', 'na-ashburn':'Ashburn', 'sa-saopaulo':'Sao Paulo',
+  // 阿里云 ECS 地域
+  'cn-qingdao':'Qingdao', 'cn-beijing':'Beijing', 'cn-zhangjiakou':'Zhangjiakou', 'cn-huhehaote':'Hohhot',
+  'cn-wulanchabu':'Ulanqab', 'cn-hangzhou':'Hangzhou', 'cn-shanghai':'Shanghai', 'cn-nanjing':'Nanjing',
+  'cn-shenzhen':'Shenzhen', 'cn-heyuan':'Heyuan', 'cn-guangzhou':'Guangzhou', 'cn-fuzhou':'Fuzhou',
+  'cn-wuhan-lr':'Wuhan', 'cn-zhongwei':'Zhongwei', 'cn-chengdu':'Chengdu', 'cn-hongkong':'Hong Kong',
+  'ap-northeast-1':'Tokyo', 'ap-northeast-2':'Seoul', 'ap-southeast-1':'Singapore',
+  'ap-southeast-3':'Kuala Lumpur', 'ap-southeast-5':'Jakarta', 'ap-southeast-6':'Manila',
+  'ap-southeast-7':'Bangkok', 'ap-southeast-8':'Johor',
+  'eu-central-1':'Frankfurt', 'eu-west-1':'London', 'eu-west-2':'Paris', 'eu-west-3':'Amsterdam',
+  'me-east-1':'Dubai', 'us-east-1':'Virginia', 'us-west-1':'Silicon Valley', 'na-south-1':'Mexico', 'sa-east-1':'Sao Paulo',
 };
 const cityName = slug => REGION_CITY[slug] || '';
+
+// 币种：DO 记 USD，腾讯云 / 阿里云记 CNY；缺省视为 USD。不同币种的月费不能相加，
+// 合计按币种各算一个。
+const currOf = d => d.currency || 'USD';
+const signOf = c => c === 'USD' ? '$' : c + ' ';
+function costByCurrency(list) {
+  const sums = {};
+  list.forEach(d => { const c = currOf(d); sums[c] = (sums[c] || 0) + (d.price_monthly || 0); });
+  return sums;
+}
+function fmtCosts(list) {
+  const sums = costByCurrency(list), cs = Object.keys(sums).sort();
+  return cs.length ? cs.map(c => signOf(c) + sums[c].toFixed(2)).join(' + ') : '$0.00';
+}
+// sizePrice 是规格行的价格文案：有目录价就带币种标出；没有的（按量计费、无批量询价的
+// 提供商）说明一句。
+const sizePrice = s => s.price_monthly ? signOf(currOf(s)) + s.price_monthly.toFixed(2) + '/mo' : '按量计费';
 
 // fetchJSON 带超时的 JSON 请求：单接口挂起最多等 20s，不拖垮整页。
 function fetchJSON(url) {
@@ -430,7 +473,7 @@ async function load() {
     acRes.value.accounts.forEach(a => (accountInfo[a.name] = a));
     if (acRes.value.accounts.length) allAccounts = acRes.value.accounts.map(a => a.name);
   }
-  pendingOps = droplets.some(d => d.status === 'new');
+  pendingOps = droplets.some(d => !SETTLED_STATUS.has(d.status));
   render();
   scheduleNext();
 }
@@ -489,17 +532,16 @@ function statusCell(s) {
 function updateKpis(list) {
   const total = droplets.length;
   const active = droplets.filter(d => d.status === 'active' || d.status === 'running').length;
-  const cost = droplets.reduce((s, d) => s + (d.price_monthly || 0), 0);
   const accounts = new Set(droplets.map(d => d.account)).size;
   $('kpi-accounts').textContent = accounts;
   $('kpi-total').textContent = total;
   $('kpi-active').textContent = active;
-  $('kpi-cost').textContent = '$' + cost.toFixed(2);
+  $('kpi-cost').textContent = fmtCosts(droplets);
   $('kpi-total-sub').textContent = `显示 ${list.length} 台`;
   $('kpi-active-sub').textContent = `闲置 ${total - active} 台`;
   $('kpi-accounts-sub').textContent = `失败 ${acctErrors.length} 个`;
-  $('kpi-cost-sub').textContent = 'USD / 月';
-  $('summary').textContent = `${accountNames().length} 个账号 · ${total} 台节点 · 合计月费 $${cost.toFixed(2)}`
+  $('kpi-cost-sub').textContent = (Object.keys(costByCurrency(droplets)).sort().join(' + ') || 'USD') + ' / 月';
+  $('summary').textContent = `${accountNames().length} 个账号 · ${total} 台节点 · 合计月费 ${fmtCosts(droplets)}`
     + (acctErrors.length ? ` · ${acctErrors.length} 个账号查询失败` : '');
   $('last-refresh').textContent = '上次刷新 ' + new Date().toLocaleTimeString();
 }
@@ -549,7 +591,7 @@ function render() {
     tr.append(cell(d.size));
     tr.append(cell(d.vcpus ? `${d.vcpus}C/${(d.memory_mb / 1024).toFixed(1)}G` : '—'));
     tr.append(cell(d.ipv4_public, 'mono'));
-    const tdCost = cell(d.price_monthly ? '$' + d.price_monthly.toFixed(2) : '—', 'money');
+    const tdCost = cell(d.price_monthly ? signOf(currOf(d)) + d.price_monthly.toFixed(2) : '—', 'money');
     tr.append(tdCost);
     const tdTags = document.createElement('td');
     for (const t of d.tags || []) {
@@ -568,7 +610,7 @@ function selDroplets() { return droplets.filter(d => selected.has(key(d))); }
 
 function updateBar(list) {
   const n = selected.size;
-  $('selinfo').textContent = n ? `已选 ${n} 台 · 月费 $${selDroplets().reduce((s, d) => s + (d.price_monthly || 0), 0).toFixed(2)}` : '未选择';
+  $('selinfo').textContent = n ? `已选 ${n} 台 · 月费 ${fmtCosts(selDroplets())}` : '未选择';
   for (const id of ['btn-poweroff', 'btn-poweron', 'btn-delete', 'btn-rebuild', 'btn-resize']) $(id).disabled = !n;
   $('selall').checked = list && list.length > 0 && list.every(d => selected.has(key(d)));
 }
@@ -616,7 +658,7 @@ function openDelete() {
   if (!ds.length) return;
   $('del-count').textContent = ds.length;
   $('del-need').textContent = ds.length;
-  $('del-cost').textContent = ds.reduce((s, d) => s + (d.price_monthly || 0), 0).toFixed(2);
+  $('del-cost').textContent = fmtCosts(ds);
   const lst = $('del-list');
   lst.textContent = '';
   ds.forEach(d => {
@@ -824,7 +866,7 @@ async function loadCatalogFor(acct) {
   ssel.textContent = '';
   (c.sizes || []).slice().sort((a, b) => a.price_monthly - b.price_monthly)
     .forEach(s => ssel.append(new Option(
-      `${s.slug} · ${s.vcpus}C/${(s.memory_mb / 1024).toFixed(1)}G/${s.disk_gb}G · $${s.price_monthly}/mo`, s.slug)));
+      `${s.slug} · ${s.vcpus}C/${(s.memory_mb / 1024).toFixed(1)}G${s.disk_gb ? '/' + s.disk_gb + 'G' : ''} · ${sizePrice(s)}`, s.slug)));
 
   const isel = $('cr-image');
   isel.textContent = '';
@@ -864,9 +906,10 @@ function updateEstimate() {
   const sizes = (catalog && catalog.sizes) || [];
   const size = sizes.find(s => s.slug === $('cr-size').value);
   const n = parseInt($('cr-count').value || '1', 10);
-  $('cr-est').textContent = size
-    ? `预计月费：$${(size.price_monthly * n).toFixed(2)}（$${size.price_monthly.toFixed(2)}/mo × ${n} 台）`
-    : '';
+  $('cr-est').textContent = !size ? ''
+    : size.price_monthly
+      ? `预计月费：${signOf(currOf(size))}${(size.price_monthly * n).toFixed(2)}（${signOf(currOf(size))}${size.price_monthly.toFixed(2)}/mo × ${n} 台）`
+      : '该提供商按量计费、不提供目录价格：实际费用以云厂商账单为准';
   $('cr-submit').disabled = !($('cr-account').value && $('cr-region').value
     && $('cr-size').value && $('cr-image').value && n >= 1);
 }
@@ -963,7 +1006,7 @@ function openDetails(d) {
     d.vcpus ? `${d.vcpus} vCPU · ${(d.memory_mb / 1024).toFixed(1)} GB · ${d.disk_gb} GB` : '');
   dtItem(g, '公网 IPv4', d.ipv4_public);
   dtItem(g, '私网 IPv4', d.ipv4_private);
-  dtItem(g, '月费', d.price_monthly ? '$' + d.price_monthly.toFixed(2) : '');
+  dtItem(g, '月费', d.price_monthly ? signOf(currOf(d)) + d.price_monthly.toFixed(2) : '');
   dtItem(g, '创建时间', d.created_at ? new Date(d.created_at).toLocaleString() : '', false);
   dtItem(g, '标签', (d.tags || []).join(' '), false);
   dtItem(g, 'SSH 用户（导出 NMS 用）', ai.ssh_user || 'root', false);
@@ -1032,11 +1075,21 @@ function resetAcctForm() {
   editingAccount = null;
   $('ac-form-title').textContent = '新增账号（保存到 accounts.json 并立即生效）';
   $('ac-name').value = ''; $('ac-name').disabled = false;
-  $('ac-token').value = ''; $('ac-sshuser').value = ''; $('ac-sshpass').value = '';
+  $('ac-token').value = ''; $('ac-accesskey').value = ''; $('ac-secretkey').value = '';
+  $('ac-sshuser').value = ''; $('ac-sshpass').value = '';
   $('ac-clear').checked = false;
   $('ac-clear-row').style.display = 'none';
   $('ac-edit-cancel').style.display = 'none';
   $('ac-submit').textContent = '新增账号';
+  syncCredFields();
+}
+
+// syncCredFields 按选中的提供商切换凭据输入：密钥对型填 AccessKey + Secret，其余填 Token。
+function syncCredFields() {
+  const pair = keyPairProviders.includes($('ac-provider').value);
+  $('ac-token-row').style.display = pair ? 'none' : '';
+  $('ac-key-row').style.display = pair ? '' : 'none';
+  $('ac-secret-row').style.display = pair ? '' : 'none';
 }
 
 async function loadAccounts() {
@@ -1071,25 +1124,29 @@ async function loadAccounts() {
     sel.textContent = '';
     (j.providers || ['digitalocean']).forEach(p => sel.append(new Option(p, p)));
     if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+    keyPairProviders = j.key_providers || [];
+    syncCredFields();
   } catch (e) { $('ac-msg').textContent = '请求失败: ' + e; }
 }
 
 $('btn-accounts').onclick = () => { $('modal-acct').hidden = false; resetAcctForm(); loadAccounts(); };
 $('ac-cancel').onclick = () => ($('modal-acct').hidden = true);
 $('ac-edit-cancel').onclick = resetAcctForm;
+$('ac-provider').onchange = syncCredFields;
 
 function startEdit(a) {
   editingAccount = a.name;
   $('ac-form-title').textContent = `编辑账号 ${a.name}`;
   $('ac-name').value = a.name; $('ac-name').disabled = true;
   $('ac-provider').value = a.provider;
-  $('ac-token').value = '';
+  $('ac-token').value = ''; $('ac-accesskey').value = ''; $('ac-secretkey').value = '';
   $('ac-sshuser').value = a.ssh_user || '';
   $('ac-sshpass').value = '';
   $('ac-clear').checked = false;
   $('ac-clear-row').style.display = '';
   $('ac-edit-cancel').style.display = '';
   $('ac-submit').textContent = '保存修改';
+  syncCredFields();
   $('ac-msg').textContent = '';
 }
 
@@ -1115,8 +1172,11 @@ async function removeAccount(name) {
 }
 
 $('ac-submit').onclick = async () => {
+  const provider = $('ac-provider').value, keyPair = keyPairProviders.includes(provider);
   const base = {
     token: $('ac-token').value.trim(),
+    access_key: $('ac-accesskey').value.trim(),
+    secret_key: $('ac-secretkey').value,
     ssh_user: $('ac-sshuser').value.trim(),
     ssh_password: $('ac-sshpass').value,
     clear_password: $('ac-clear').checked,
@@ -1131,10 +1191,14 @@ $('ac-submit').onclick = async () => {
         body: JSON.stringify(base),
       });
     } else {
-      if (!base.token) { $('ac-msg').textContent = 'API token 必填'; return; }
+      // 新增时凭据必须给全：密钥对型成对，Token 型单个
+      const missing = keyPair
+        ? (base.access_key && base.secret_key ? '' : 'AccessKey ID 与 Secret 必须成对填写')
+        : (base.token ? '' : 'API Token 必填');
+      if (missing) { $('ac-msg').textContent = missing; return; }
       r = await fetch('/api/accounts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({ name: $('ac-name').value.trim(), provider: $('ac-provider').value }, base)),
+        body: JSON.stringify(Object.assign({ name: $('ac-name').value.trim(), provider }, base)),
       });
     }
     const j = await r.json();

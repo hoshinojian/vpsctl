@@ -165,6 +165,7 @@ type ServerJSON struct {
 	MemoryMB     int       `json:"memory_mb"`
 	DiskGB       int       `json:"disk_gb"`
 	PriceMonthly float64   `json:"price_monthly"`
+	Currency     string    `json:"currency,omitempty"` // price_monthly 的币种；空 = USD，不同币种不可相加
 	IPv4Public   string    `json:"ipv4_public,omitempty"`
 	IPv4Private  string    `json:"ipv4_private,omitempty"`
 	SSHPort      int       `json:"ssh_port,omitempty"` // 建机注入的 sshd 端口（缺省 0 = 未指定/22）
@@ -342,6 +343,7 @@ func ToServerJSON(s provider.Server) ServerJSON {
 		Region: s.Region, Size: s.Size, Image: s.Image,
 		VCPUs: s.VCPUs, MemoryMB: s.MemoryMB, DiskGB: s.DiskGB,
 		PriceMonthly: s.PriceMonthly,
+		Currency:     s.Currency,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
 		Lat: s.Lat, Lng: s.Lng,

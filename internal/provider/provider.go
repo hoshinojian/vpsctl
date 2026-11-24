@@ -31,11 +31,14 @@ type Server struct {
 	VCPUs        int     //
 	MemoryMB     int     //
 	DiskGB       int     //
-	PriceMonthly float64 // USD
-	IPv4Public   string  //
-	IPv4Private  string  //
-	Tags         []string
-	CreatedAt    time.Time
+	PriceMonthly float64 // 每月单价，币种见 Currency
+	// Currency 是 PriceMonthly 的币种（ISO 4217，如 USD / CNY）；空视为 USD。
+	// 管理台按币种分别合计，不同币种不能相加。
+	Currency    string //
+	IPv4Public  string //
+	IPv4Private string //
+	Tags        []string
+	CreatedAt   time.Time
 	// Lat/Lng 是节点所在地理坐标（等距投影用）。提供商 API 通常不直接返回，
 	// 由各实现在 toServer 里按 region slug 从静态映射表填写；未知 slug 为 0。
 	Lat float64
@@ -79,6 +82,7 @@ type Size struct {
 	MemoryMB     int     `json:"memory_mb"`
 	DiskGB       int     `json:"disk_gb"`
 	PriceMonthly float64 `json:"price_monthly"`
+	Currency     string  `json:"currency,omitempty"` // 空视为 USD
 }
 
 // Image 是系统镜像。
@@ -108,29 +112,70 @@ type Provider interface {
 	Images(ctx context.Context) ([]Image, error)
 }
 
-// Factory 按 (账号名, token) 构造客户端；hc 为 nil 时用默认 http.Client。
-type Factory func(account, token string, hc *http.Client) (Provider, error)
+// AuthKind 是提供商的凭据形态，供配置与管理台决定该让用户填什么。
+type AuthKind string
+
+const (
+	AuthToken   AuthKind = "token"   // 单个 API Token（DigitalOcean）
+	AuthKeyPair AuthKind = "keypair" // AccessKey ID + Secret（腾讯云、阿里云）
+)
+
+// Credentials 是账号的提供商凭据：单 Token 型提供商只看 Token，密钥对型只看
+// AccessKey + SecretKey。由 config.Account.Credentials 生成。
+type Credentials struct {
+	Token     string
+	AccessKey string // 腾讯云 SecretId / 阿里云 AccessKey ID
+	SecretKey string // 腾讯云 SecretKey / 阿里云 AccessKey Secret
+}
+
+// Factory 按账号名与凭据构造客户端；hc 为 nil 时用默认 http.Client。
+type Factory func(account string, cred Credentials, hc *http.Client) (Provider, error)
 
 var registry = map[string]Factory{}
+var authKinds = map[string]AuthKind{}
 
-// Register 注册提供商实现，供各实现包的 init 调用。
-func Register(name string, f Factory) {
+// Register 注册提供商实现及其凭据形态，供各实现包的 init 调用。
+func Register(name string, auth AuthKind, f Factory) {
 	if _, dup := registry[name]; dup {
 		panic(fmt.Sprintf("provider: %q 重复注册", name))
 	}
 	registry[name] = f
+	authKinds[name] = auth
 }
 
 // New 按提供商名构造对应客户端。
-func New(name, account, token string, hc *http.Client) (Provider, error) {
+func New(name, account string, cred Credentials, hc *http.Client) (Provider, error) {
 	f, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("provider: 未知提供商 %q（已注册: %v）", name, Names())
 	}
-	return f(account, token, hc)
+	return f(account, cred, hc)
 }
 
 // Names 返回已注册的提供商名（升序）。
 func Names() []string {
 	return slices.Sorted(maps.Keys(registry))
+}
+
+var chpasswdCompat = map[string]bool{}
+
+// RegisterChpasswdCompat 标记提供商的公共镜像带旧版 / 定制版 cloud-init：注入密码的
+// cloud-init 要同时下发老的 chpasswd.list 写法（见 fleet.CloudInitParams.ChpasswdCompat）。
+// 由对应 provider 的 init 调用。
+func RegisterChpasswdCompat(name string) { chpasswdCompat[name] = true }
+
+// ChpasswdCompat 报告某提供商是否需要兼容老的 cloud-init 密码写法；未注册的提供商名按 false。
+func ChpasswdCompat(name string) bool { return chpasswdCompat[name] }
+
+// KeyPairProviders 返回凭据为密钥对型（AccessKey + Secret）的提供商名（升序）。
+// 未注册的提供商名不在返回值里。
+func KeyPairProviders() []string {
+	var out []string
+	for name, kind := range authKinds {
+		if kind == AuthKeyPair {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

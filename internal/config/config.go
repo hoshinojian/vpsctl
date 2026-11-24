@@ -8,17 +8,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
 // Account 是单个提供商账号的凭据描述。
+// 凭据二选一：单 Token 型提供商（DigitalOcean）填 Token；密钥对型（腾讯云、阿里云）
+// 填 AccessKey + SecretKey。哪类提供商该填哪个由各提供商自己校验。
 // SSHUser/SSHPassword 可选：用于创建时注入密码（cloud-config）与
 // `list --format nms` 导出 NMS 台账载荷（NMS 录入 ssh_password 必填）。
 type Account struct {
-	Name        string `json:"name"`
-	Provider    string `json:"provider"`
-	Token       string `json:"token"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Token    string `json:"token,omitempty"`
+	// AccessKey 是腾讯云 SecretId / 阿里云 AccessKey ID；SecretKey 是对应的密钥。
+	AccessKey   string `json:"access_key,omitempty"`
+	SecretKey   string `json:"secret_key,omitempty"`
 	SSHUser     string `json:"ssh_user,omitempty"`
 	SSHPassword string `json:"ssh_password,omitempty"`
+}
+
+// Credentials 把账号凭据转成构造客户端用的形态。
+func (a Account) Credentials() provider.Credentials {
+	return provider.Credentials{Token: a.Token, AccessKey: a.AccessKey, SecretKey: a.SecretKey}
 }
 
 // File 是 accounts.json 的顶层结构。
@@ -75,8 +87,13 @@ func (f *File) Validate() error {
 		if a.Provider == "" {
 			return fmt.Errorf("账号 %q 缺少 provider", a.Name)
 		}
-		if a.Token == "" {
-			return fmt.Errorf("账号 %q 缺少 token", a.Name)
+		switch {
+		case a.Token == "" && a.AccessKey == "" && a.SecretKey == "":
+			return fmt.Errorf("账号 %q 缺少 token（密钥对型提供商填 access_key/secret_key）", a.Name)
+		case a.Token == "" && a.AccessKey == "":
+			return fmt.Errorf("账号 %q 缺少 access_key", a.Name)
+		case a.Token == "" && a.SecretKey == "":
+			return fmt.Errorf("账号 %q 缺少 secret_key", a.Name)
 		}
 	}
 	return nil

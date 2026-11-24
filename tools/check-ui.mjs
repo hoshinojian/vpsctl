@@ -26,6 +26,8 @@ const FIXTURE_DROPLETS = {
       lat: 51.51, lng: -0.13, ipv4_public: "203.0.113.11", price_monthly: 6, tags: [] },
     { account: "do-2", id: "3", name: "do-2-node-c", status: "new", region: "unknown-region",
       ipv4_public: "", price_monthly: 5, tags: [] },
+    { account: "tc-1", id: "ins-1", name: "tc-1-node-d", status: "stopping", region: "ap-beijing",
+      lat: 39.9, lng: 116.41, ipv4_public: "203.0.113.12", price_monthly: 151.1, currency: "CNY", tags: ["batch:t1"] },
   ],
   errors: [{ account: "do-3", error: "HTTP 401" }],
 };
@@ -34,7 +36,8 @@ const FIXTURES = {
   "/api/catalog": { accounts: ["do-1", "do-2", "do-3"] },
   "/api/accounts": { accounts: [
     { name: "do-1", provider: "digitalocean", ssh_user: "root", has_password: true },
-  ], providers: ["digitalocean"] },
+  ], providers: ["aliyun-ecs", "digitalocean", "tencent-cvm"],
+  key_providers: ["aliyun-ecs", "tencent-cvm"] },
   "/api/operations": { operations: [
     { time: "2026-09-09T03:00:00Z", kind: "power", detail: "power_off 1 台", ok: 1, fail: 0 },
   ] },

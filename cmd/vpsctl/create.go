@@ -12,6 +12,7 @@ import (
 
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
 func runCreate(args []string) error {
@@ -180,6 +181,7 @@ func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPa
 		ud, err := fleet.CloudInitSpec(fleet.CloudInitParams{
 			User: a.SSHUser, Password: a.SSHPassword, SSHPort: sshPort, Tunnel443: tunnel443,
 			AuthorizedKeys: authKeys,
+			ChpasswdCompat: provider.ChpasswdCompat(a.Provider), // 镜像的 cloud-init 可能不认 users 写法
 		})
 		if err != nil {
 			return fmt.Errorf("账号 %s: %w", c.Name, err)

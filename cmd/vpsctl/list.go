@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"text/tabwriter"
 
 	"github.com/hoshinojian/vpsctl/internal/fleet"
@@ -56,9 +57,17 @@ func runList(kind string, args []string) error {
 			if err != nil {
 				return fmt.Errorf("账号 %s: %w", ac.Name, err)
 			}
-			fmt.Fprintln(tw, "SLUG\tvCPU\t内存MB\t磁盘GB\t月费USD")
+			fmt.Fprintln(tw, "SLUG\tvCPU\t内存MB\t磁盘GB\t月费")
 			for _, it := range items {
-				fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%.2f\n", it.Slug, it.VCPUs, it.MemoryMB, it.DiskGB, it.PriceMonthly)
+				// 磁盘与月费不是每家提供商都有（机型与盘解耦、无批量询价），缺省打 —
+				disk, cost := "—", "—"
+				if it.DiskGB > 0 {
+					disk = strconv.Itoa(it.DiskGB)
+				}
+				if it.PriceMonthly > 0 {
+					cost = fmt.Sprintf("%.2f %s", it.PriceMonthly, currencyOf(it.Currency))
+				}
+				fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n", it.Slug, it.VCPUs, it.MemoryMB, disk, cost)
 			}
 		case "images":
 			items, err := ac.Provider.Images(ctx)
@@ -82,4 +91,12 @@ func runList(kind string, args []string) error {
 		tw.Flush()
 	}
 	return nil
+}
+
+// currencyOf 把币种字段归一成 ISO 代码：空视为 USD（DO 的旧字段不带币种）。
+func currencyOf(c string) string {
+	if c == "" {
+		return "USD"
+	}
+	return c
 }

@@ -65,11 +65,11 @@ func New(account, token string, hc *http.Client) *Client {
 }
 
 func init() {
-	provider.Register("digitalocean", func(account, token string, hc *http.Client) (provider.Provider, error) {
-		if token == "" {
+	provider.Register("digitalocean", provider.AuthToken, func(account string, cred provider.Credentials, hc *http.Client) (provider.Provider, error) {
+		if cred.Token == "" {
 			return nil, errors.New("digitalocean: token 为空")
 		}
-		return New(account, token, hc), nil
+		return New(account, cred.Token, hc), nil
 	})
 }
 
