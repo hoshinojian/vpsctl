@@ -1,7 +1,8 @@
 # vpsctl
 
 跨 VPS 提供商的节点供给/回收小工具。Go 单二进制、零第三方依赖；多账号配置驱动；
-本地 Web 管理台；当前支持 **DigitalOcean**，后续按同一 Provider 接口扩展 Vultr / 阿里云等。
+本地 Web 管理台；当前支持 **DigitalOcean、腾讯云 CVM、阿里云 ECS**（三家都按量计费、随建随删），
+后续按同一 Provider 接口继续扩展。
 
 > **凭据安全（本仓库为 public）**：真实 API token 只放本地
 > `~/.config/vpsctl/accounts.json`（建议 600 权限），该文件已进 .gitignore，严禁提交。
@@ -22,12 +23,18 @@ make build   # 产物 bin/vpsctl
   "accounts": [
     { "name": "do-1", "provider": "digitalocean", "token": "dop_v1_xxx",
       "ssh_user": "root", "ssh_password": "CHANGE_ME" },
-    { "name": "do-2", "provider": "digitalocean", "token": "dop_v1_yyy" }
+    { "name": "do-2", "provider": "digitalocean", "token": "dop_v1_yyy" },
+    { "name": "tc-1", "provider": "tencent-cvm",
+      "access_key": "AKID_xxx", "secret_key": "腾讯云 SecretKey" },
+    { "name": "ali-1", "provider": "aliyun-ecs",
+      "access_key": "LTAI_xxx", "secret_key": "阿里云 AccessKey Secret" }
   ]
 }
 ```
 
 - `name`：账号别名，出现在节点命名与结果 JSON 里，需唯一
+- 凭据二选一：`provider: digitalocean` 填 `token`；`provider: tencent-cvm` / `aliyun-ecs` 填
+  `access_key` + `secret_key`（腾讯云是 SecretId / SecretKey，阿里云是 AccessKey ID / Secret）
 - `ssh_user`/`ssh_password`（可选）：账号级 SSH 凭据。配置了密码的账号，
   `create` 时自动注入最小 cloud-config 设密码并开启 SSH 密码登录（与
   `--user-data` 互斥，同给报错）；`list --format nms` 导出 NMS 载荷时带上
@@ -38,6 +45,8 @@ make build   # 产物 bin/vpsctl
 ```sh
 vpsctl accounts list                                     # 脱敏列表（密码只显示有无）
 vpsctl accounts add --name do-3 --token dop_v1_xxx --ssh-password pw
+vpsctl accounts add --name tc-1 --provider tencent-cvm --access-key AKID_xxx --secret-key xxx
+vpsctl accounts edit --name tc-1 --access-key AKID_yyy --secret-key yyy   # 密钥对必须成对改
 vpsctl accounts edit --name do-3 --ssh-user deploy --clear-password
 vpsctl accounts remove --name do-3 [--force]             # 有节点时要求 --force
 ```
@@ -174,16 +183,83 @@ vpsctl sizes
 vpsctl keys --only team3      # 查询单个账号
 ```
 
-## 扩展新提供商（Vultr / 阿里云…）
+- `sizes` 的月费列带币种（`6.00 USD` / `146.00 CNY`）；没有目录价的机型打 `—`
 
-1. 新建 `internal/provider/<name>/`，实现 `provider.Provider` 接口（List/Get/Create/Delete/Power/ActionStatus/SSHKeys/Regions/Sizes/Images）
-2. 在 `init()` 里 `provider.Register("<name>", factory)`；`cmd/vpsctl/main.go` 加一条 blank import
+## 腾讯云 CVM / 阿里云 ECS
+
+两家都走**云服务器**产品线、**按量计费**（和 DO 一样按小时付费、随建随删）。编排层与管理台
+无感，差异全部吸收在 `internal/provider/tencent/cvm/` 与 `internal/provider/aliyun/ecs/`：
+
+| | 腾讯云 `tencent-cvm` | 阿里云 `aliyun-ecs` |
+| --- | --- | --- |
+| 凭据 | 子用户 SecretId / SecretKey | RAM 用户 AccessKey ID / Secret |
+| 区域 slug | 地域 `ap-beijing`，或可用区 `ap-beijing-8` | 地域 `cn-qingdao`，或可用区 `cn-qingdao-b` |
+| 套餐 slug | 机型名，如 `SA5.MEDIUM2` | 规格 ID，如 `ecs.u1-c1m1.large` |
+| 镜像 slug | `ubuntu-24.04`、`centos-7.09`…（跨地域稳定），也可直接给 ImageId | 同左 |
+| 月费 | 按量小时价 × 730 折算，`currency` 为 `CNY` | 同左 |
+
+```sh
+vpsctl sizes  --only tc-1     # 看可选机型
+vpsctl images --only tc-1     # 看可选镜像
+vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-24.04 \
+  --count 1 --name-prefix vps --wait 300s
+```
+
+- **网络**：落在该地域的默认 VPC / 默认交换机上（区域给了可用区就取该可用区的子网），不代建
+  网络——地域没有默认 VPC（腾讯云）或没有交换机（阿里云）时报错，请先在控制台建好
+- **安全组**：腾讯云不指定，由平台绑默认安全组（没有则自动创建一个）；阿里云取交换机所在
+  VPC 的安全组
+- **系统盘类型**随机型而异、没有稳妥的查询口：建机前用 `DryRun` 逐个试（腾讯云 增强型 SSD →
+  高性能云盘 → …；阿里云 ESSD → ESSD Entry → 高效云盘 → …），第一个通过的才真建。`DryRun`
+  同时是整体预检，参数 / 库存问题在扣费前就报出来
+- **密码注入**照旧走 cloud-init（`ssh_user` / `ssh_password`）。腾讯云的公共镜像带的是定制版
+  cloud-init 20.1，不认 22.3 才有的 `chpasswd.users` 写法（密码会静默不生效），所以腾讯云建机
+  同时下发老的 `chpasswd.list` 写法。两家 Ubuntu 镜像实测 root 密码都可直接 SSH，重装后密码仍有效
+- **关开机 / 重装 / 改配后公网 IP 不变**，纳管用的地址不会漂
+- **改配不含磁盘扩容**：只调机型 / 规格，`resize --resize-disk` 直接报错（扩盘请去控制台）。
+  改配完成后平台还要收尾一小会儿，这期间的开机请求 vpsctl 会自动等待重试
+- **重装**是 关机 → 重装系统盘 → 开机，保留实例 ID / 公网 IP。镜像是否适配机型只能由平台判定：
+  建机时 `DryRun` 预检会拦下；重装时才被拒的话系统盘不会动，实例会恢复开机
+- **一次未复现的故障留档**：腾讯云有一台测试机在"重装完成约 30 秒后改配"之后 22 端口被拒
+  （实例显示运行中、能 ping 通），关机再开机无效，重装后恢复；之后 4 次相同或相近的操作都正常，
+  原因未查明。遇到类似情况先用 `vpsctl rebuild` 恢复
+- **`sizes` 目录**只列每系列最新一代、≤8 vCPU 的通用机型，且**不带价格**（两家都没有批量询价）；
+  月费在 `list` 里逐台询价。别的机型直接把机型名写进 `--size`
+- **列表较慢**：两家都是地域型 API，`list` 要逐地域并发查（阿里云 33 个地域，受最慢的海外
+  接入点拖累，一次约 5–10 秒）；管理台"月费合计"按币种分别相加，不同币种不混算
+- **账号下的存量机器**也会一并列出、可被选中操作——给 vpsctl 配密钥前先想清楚这一点
+
+权限与验证（2026-11-24 实测，用的是各自账号里的子用户 / RAM 用户）：
+
+- 两家各用一台最小规格的按量实例做过全链路真机验证：建机（注入 root 密码）→ 密码 SSH →
+  关开机 → 重装 → 改配 → 销毁（云盘无残留）
+- 列表、开关机、重装、改配、销毁只需要云服务器相关的读写权限（腾讯云建机还要能读默认
+  VPC / 子网）
+- 腾讯云**建机另需付款权限**——主账号在「访问管理 → 用户列表 → vpsctl → 关联策略」加
+  `QCloudFinanceFullAccess`，否则报
+  `UnauthorizedOperation: Since you have no payment rights and cannot complete the payment`。
+  这一条 `DryRun` 预检发现不了（预检会通过，真下单才被拒）
+
+## 扩展新提供商
+
+1. 新建 `internal/provider/<name>/`，实现 `provider.Provider` 接口（List/Get/Create/Delete/Power/ActionStatus/Rebuild/Resize/SSHKeys/Regions/Sizes/Images）
+2. 在 `init()` 里 `provider.Register("<name>", provider.AuthToken 或 provider.AuthKeyPair, factory)`
+   ——第二个参数决定配置与管理台让用户填 Token 还是 AccessKey + Secret；`cmd/vpsctl/main.go`
+   加一条 blank import
 3. `accounts.json` 里把对应账号的 `provider` 改为 `<name>` 即可，编排层与 UI 零改动
+
+现成可复用的部件：
+
+- `internal/provider/tencent`（TC3-HMAC-SHA256 签名）、`internal/provider/aliyun`（ACS3-HMAC-SHA256
+  签名）：两家 API 的最小客户端，带限流 / 5xx 退避重试，别的产品线直接复用
+- `provider.TTLCache`（目录类查询缓存）、`provider.EncodeActionRef`（把地域 / 实例 / 动作编进
+  异步句柄）、`provider.RegionIndex`（实例 ID → 地域，地域型 API 按 ID 操作时定位用）
 
 参考资料（各家官方客户端，端点语义/分页/签名的"标准答案"）：
 DigitalOcean [godo](https://github.com/digitalocean/godo)、
 Vultr [govultr](https://github.com/vultr/govultr)（游标分页）、
-阿里云 [aliyun-cli](https://github.com/aliyun/aliyun-cli)（ACS3-HMAC-SHA256 签名，纯标准库可实现）。
+腾讯云 [tencentcloud-sdk-go](https://github.com/TencentCloud/tencentcloud-sdk-go)、
+阿里云 [aliyun-cli](https://github.com/aliyun/aliyun-cli)。
 
 ## 开发
 

@@ -11,6 +11,18 @@
       "name": "do-2",
       "provider": "digitalocean",
       "token": "REPLACE_ME_DIGITALOCEAN_PERSONAL_ACCESS_TOKEN"
+    },
+    {
+      "name": "tc-1",
+      "provider": "tencent-cvm",
+      "access_key": "REPLACE_ME_TENCENT_SECRET_ID",
+      "secret_key": "REPLACE_ME_TENCENT_SECRET_KEY"
+    },
+    {
+      "name": "ali-1",
+      "provider": "aliyun-ecs",
+      "access_key": "REPLACE_ME_ALIYUN_ACCESS_KEY_ID",
+      "secret_key": "REPLACE_ME_ALIYUN_ACCESS_KEY_SECRET"
     }
   ]
 }
