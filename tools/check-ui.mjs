@@ -70,6 +70,13 @@ const FIXTURES = {
   "/api/accounts": { accounts: ACCOUNTS,
     providers: ["aliyun-ecs", "digitalocean", "tencent-cvm", "tencent-lighthouse"],
     key_providers: ["aliyun-ecs", "tencent-cvm", "tencent-lighthouse"] },
+  // 默认账号（排在第一个的 do-1）的目录：下面让它故意慢一点返回，复现"打开弹窗立刻切账号"的竞态
+  "/api/catalog?account=do-1": {
+    regions: [{ slug: "sgp1", name: "Singapore 1" }],
+    sizes: [{ slug: "s-1vcpu-1gb", vcpus: 1, memory_mb: 1024, disk_gb: 25, price_monthly: 6 }],
+    images: [{ slug: "ubuntu-24-04-x64", distribution: "Ubuntu", name: "24.04 x64" }],
+    keys: [],
+  },
   "/api/operations": { operations: [
     { time: "2026-09-09T03:00:00Z", kind: "power", detail: "power_off 1 台", ok: 1, fail: 0 },
   ] },
@@ -116,8 +123,16 @@ globalThis.fetch = async (url, init = {}) => {
   const full = new URL(url, "http://check-ui");
   // 带账号的目录查询按账号找载荷，找不到再退回不带参数的那份
   const key = full.searchParams.has("account") ? full.pathname + "?account=" + full.searchParams.get("account") : full.pathname;
-  if (init.method === "POST") { posts.push(full.pathname + " " + String(init.body)); return { ok: true, json: async () => ({ results: [] }) }; }
+  if (init.method === "POST") {
+    posts.push(full.pathname + " " + String(init.body));
+    // 建机接口的回应由页面驱动脚本指定（要模拟"一台都没建出来"）；别的写接口一律回空结果
+    const resp = full.pathname === "/api/create" && globalThis.__createResponse ? globalThis.__createResponse : { results: [] };
+    globalThis.__createResponse = null;
+    return { ok: true, status: 200, json: async () => structuredClone(resp) };
+  }
   if (!(key in FIXTURES)) throw new Error("无载荷 fixture: " + key);
+  // 默认账号的目录慢：真实环境里阿里云要查 33 个地域，比别的账号晚到
+  if (key === "/api/catalog?account=do-1") await new Promise(r => setTimeout(r, 80));
   return { ok: true, json: async () => structuredClone(FIXTURES[key]) };
 };
 
@@ -190,6 +205,28 @@ const driver = `
     document.getElementById("modal-off").hidden = true;
     selected.clear();
 
+    // 创建弹窗的竞态：弹窗一打开就为默认账号（do-1）去拉目录，那个请求慢；用户立刻切到轻量账号，
+    // 轻量的目录先到。慢请求后到时不能把当前账号的选项盖掉——真机上出过"账号是腾讯云、
+    // 区域 / 机型 / 镜像却是阿里云的"
+    (() => { openCreate().catch(() => {}); })();
+    await new Promise(r => setTimeout(r, 20));
+    const acctSel = document.getElementById("cr-account");
+    // 真实浏览器里下拉填入选项后会自动选中第一个，页面模型不会——手动把默认账号选中，
+    // 让它的（慢）目录请求先发出去，这才是真机上出事时的状态
+    acctSel.value = acctSel.children[0] ? acctSel.children[0].value : "";
+    acctSel.onchange();
+    await new Promise(r => setTimeout(r, 20));   // 默认账号的目录还在路上（它要 80ms）
+    out.raceSubmitDisabledWhileLoading = document.getElementById("cr-submit").disabled;
+    await new Promise(r => setTimeout(r, 20));
+    acctSel.value = "lh-1";
+    acctSel.onchange();   // 页面模型没有 dispatchEvent，直接调页面挂的切换处理
+    await new Promise(r => setTimeout(r, 300));   // 等慢请求也回来了
+    out.raceAccount = acctSel.value;
+    out.raceSizeOptions = [...document.getElementById("cr-size").children].map(o => o.value);
+    out.raceRegionOptions = [...document.getElementById("cr-region").children].map(o => o.value);
+    document.getElementById("modal-create").hidden = true;
+    await new Promise(r => setTimeout(r, 150));
+
     // 创建弹窗：账号名带云平台；轻量账号说明"付一个月"；轻量 + Ubuntu 提示不能重装
     await openCreate();
     out.createAccountOptions = [...document.getElementById("cr-account").children].map(o => o.text);
@@ -203,6 +240,19 @@ const driver = `
     document.getElementById("cr-image").value = "debian-12";
     updateEstimate();
     out.lightWarnDebian = document.getElementById("cr-warn").textContent;
+
+    // 建机一台都没建出来（预检没过）：服务端给的是 created: null + errors。界面要把原因亮出来，
+    // 不能读 null 的长度崩掉把原因吞了——真机上出过，用户只看到弹窗消失、没有任何提示
+    globalThis.__createResponse = { batch: "b", requested: { "lh-1": 1 }, created: null,
+      errors: [{ account: "lh-1", name: "vps-lh-1-ap-guangzhou-01", index: 1,
+        error: "建机预检（DryRun）未通过：ResourceUnavailable.InstanceType: 机型在当前可用区没有货" }] };
+    const bannerEl = document.getElementById("banner");
+    bannerEl.className = ""; bannerEl.textContent = "";
+    await document.getElementById("cr-submit").onclick();
+    out.createAllFailedBanner = bannerEl.textContent;
+    out.createAllFailedShown = bannerEl.className.includes("show");
+    out.createAllFailedModalHidden = document.getElementById("modal-create").hidden;
+    bannerEl.className = ""; bannerEl.textContent = "";
     document.getElementById("modal-create").hidden = true;
 
     globalThis.__ui = out;
@@ -270,6 +320,11 @@ check("台数输对后才能确认", ui.offConfirmDisabledRight === false, `got 
 check("关机弹窗期间没有发出关机请求", ui.postsBeforeConfirm === 0, `posts = ${JSON.stringify(posts)}`);
 
 // 创建弹窗
+check("快速切账号：默认账号的慢目录不会盖掉当前账号的选项",
+  ui.raceAccount === "lh-1" && JSON.stringify(ui.raceSizeOptions) === JSON.stringify(["bundle_starter_mc_med2_03"])
+  && JSON.stringify(ui.raceRegionOptions) === JSON.stringify(["ap-guangzhou"]),
+  `account=${ui.raceAccount} sizes=${JSON.stringify(ui.raceSizeOptions)} regions=${JSON.stringify(ui.raceRegionOptions)}`);
+check("目录还在加载时不能点「创建」", ui.raceSubmitDisabledWhileLoading === true, `disabled=${ui.raceSubmitDisabledWhileLoading}`);
 check("创建弹窗的账号带云平台名",
   ["do-1 · DigitalOcean", "tc-1 · 腾讯云", "lh-1 · 腾讯云", "al-1 · 阿里云"].every(t => (ui.createAccountOptions ?? []).includes(t)),
   JSON.stringify(ui.createAccountOptions));
@@ -277,6 +332,9 @@ check("轻量账号说明「建一次付一个月」", (ui.lightEstimate ?? "").
   && (ui.lightEstimate ?? "").includes("CNY 35.00") && (ui.lightEstimate ?? "").includes("自动续费"), ui.lightEstimate);
 check("轻量 + Ubuntu 提示以后不能重装", (ui.lightWarnUbuntu ?? "").includes("不能重装"), ui.lightWarnUbuntu);
 check("轻量 + Debian 没有这条提示", ui.lightWarnDebian === "", ui.lightWarnDebian);
+check("建机全部失败：原因显示在页面上，而不是崩掉被吞",
+  ui.createAllFailedShown === true && (ui.createAllFailedBanner ?? "").includes("机型在当前可用区没有货")
+  && !(ui.createAllFailedBanner ?? "").includes("TypeError"), `shown=${ui.createAllFailedShown} banner=${ui.createAllFailedBanner}`);
 
 // 静态 id 引用检查：脚本里 $('字面量') 的 id 必须在 HTML 中定义（动态 `#` 拼接另行靠上断言兜底）
 const defined = new Set([...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]));

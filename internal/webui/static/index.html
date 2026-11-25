@@ -987,6 +987,11 @@ function hideTip() { $('map-tip').style.display = 'none'; }
 
 /* ---- 创建节点 ---- */
 let catalog = null;
+// catalogSeq 是"拉目录"的序号。弹窗一打开就为默认账号发一次，用户马上切账号又会发一次；
+// 各账号快慢不一（阿里云要查三十多个地域），先发的可能后到。所以只有最后一次的结果才能
+// 写进界面——真机上出过：账号是腾讯云，区域 / 机型 / 镜像却是阿里云的（默认账号的慢请求
+// 后到，把当前账号的选项整个盖掉）。
+let catalogSeq = 0;
 
 async function openCreate() {
   $('modal-create').hidden = false;
@@ -1006,13 +1011,27 @@ async function openCreate() {
 
 async function loadCatalogFor(acct) {
   if (!acct) return;
+  const seq = ++catalogSeq;
   $('cr-msg').textContent = '加载可选值…（首次约数秒）';
+  // 加载期间不能提交：这时下拉里还是上一个账号的选项，提交出去就是"新账号 + 旧账号的选项"
+  $('cr-submit').disabled = true;
+  $('cr-est').textContent = '';
+  $('cr-warn').textContent = '';
+  let j;
   try {
     const r = await fetch('/api/catalog?account=' + encodeURIComponent(acct));
-    const j = await r.json();
-    if (!r.ok) { $('cr-msg').textContent = '失败: ' + (j.error || r.status); return; }
-    catalog = Object.assign(catalog || {}, j);
-  } catch (e) { $('cr-msg').textContent = '请求失败: ' + e; return; }
+    j = await r.json();
+    if (!r.ok) {
+      if (seq === catalogSeq) $('cr-msg').textContent = '失败: ' + (j.error || r.status);
+      return;
+    }
+  } catch (e) {
+    if (seq === catalogSeq) $('cr-msg').textContent = '请求失败: ' + e;
+    return;
+  }
+  // 期间用户又切了账号：这次的结果作废
+  if (seq !== catalogSeq) return;
+  catalog = Object.assign(catalog || {}, j);
   const c = catalog;
 
   const rsel = $('cr-region');
@@ -1111,13 +1130,20 @@ $('cr-submit').onclick = async () => {
     const j = await r.json();
     if (!r.ok) { $('cr-msg').textContent = '失败: ' + (j.error || r.status); return; }
     $('modal-create').hidden = true;
-    const fails = j.errors || [];
-    if (!fails.length) toast(`已提交创建 ${j.created.length} 台，列表稍后自动刷新可见`);
-    else banner(`成功 ${j.created.length} 台，失败 ${fails.length} 台：\n`
-      + fails.map(e => `${e.name}: ${e.error}`).join('\n'), true);
+    // 服务端对"一台都没建出来"给的是 created: null（空切片的 JSON 形态），不能直接读它的长度
+    const created = j.created || [], fails = j.errors || [];
+    const detail = fails.map(e => `${e.name}: ${e.error}`).join('\n');
+    if (!fails.length) toast(`已提交创建 ${created.length} 台，列表稍后自动刷新可见`);
+    // 弹窗已经关了，结果一律写在页面级的横幅上。全部失败要说得明白：预检没过就是这种情况，
+    // 原因（机型在可用区没货之类）都在平台给的错误原文里——真机上出过读 null 崩掉、原因被吞，
+    // 用户只看到弹窗消失
+    else if (!created.length) banner(`创建失败，一台也没建出来：\n${detail}`, true);
+    else banner(`成功 ${created.length} 台，失败 ${fails.length} 台：\n${detail}`, true);
     pendingOps = true; // 新节点进入 new，进快轮询
     await load();
   } catch (e) {
+    // 弹窗可能已经关了（响应回来之后才出的错），所以也写到横幅上，免得用户什么也看不到
+    banner('创建请求出错: ' + e, true);
     $('cr-msg').textContent = '请求失败: ' + e;
   } finally {
     updateEstimate();
