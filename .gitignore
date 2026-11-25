@@ -1,5 +1,6 @@
 # 凭据与本地配置（public 仓库，严禁提交）
 accounts.json
+node-passwords.json
 *.local.json
 .env
 

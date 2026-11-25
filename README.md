@@ -5,7 +5,8 @@
 后续按同一 Provider 接口继续扩展。
 
 > **凭据安全（本仓库为 public）**：真实 API token 只放本地
-> `~/.config/vpsctl/accounts.json`（建议 600 权限），该文件已进 .gitignore，严禁提交。
+> `~/.config/vpsctl/accounts.json`（建议 600 权限）和节点密码库
+> `~/.config/vpsctl/node-passwords.json`，两者都已进 .gitignore，严禁提交。
 > 仓内只有占位符示例 `accounts.example.json`。
 
 ## 构建
@@ -35,9 +36,10 @@ make build   # 产物 bin/vpsctl
 - `name`：账号别名，出现在节点命名与结果 JSON 里，需唯一
 - 凭据二选一：`provider: digitalocean` 填 `token`；`provider: tencent-cvm` / `aliyun-ecs` 填
   `access_key` + `secret_key`（腾讯云是 SecretId / SecretKey，阿里云是 AccessKey ID / Secret）
-- `ssh_user`/`ssh_password`（可选）：账号级 SSH 凭据。配置了密码的账号，
-  `create` 时自动注入最小 cloud-config 设密码并开启 SSH 密码登录（与
-  `--user-data` 互斥，同给报错）；`list --format nms` 导出 NMS 载荷时带上
+- `ssh_user`（可选）：建机注入密码时设给哪个用户，缺省 `root`；导出 NMS 载荷时也带上
+- `ssh_password`（可选，只给存量节点兜底）：vpsctl 建机时给**每台节点生成一个随机 root 密码**
+  （见「每台节点一个随机 root 密码」），不再用账号级密码；`ssh_password` 只在导出 NMS 载荷时
+  给"密码库里没有记录的节点"（老版本建的、别的工具建的）兜底
 - 加载时若文件权限过宽会告警（token 文件建议 `chmod 600`）
 
 ### 账号管理（CLI 与管理台两端等价）
@@ -72,7 +74,8 @@ vpsctl create \
 | `--region/--size/--image` | 必填，slug 可先用 `regions`/`sizes`/`images` 子命令查询 |
 | `--ssh-keys` | 逗号分隔，支持 ID / 指纹 / 名称混填（名称自动解析） |
 | `--tags` | 附加 tag；自动追加 `batch:<UTC时间戳>` 便于按批筛选 |
-| `--user-data` | cloud-init 文件路径 |
+| `--user-data` | cloud-init 文件路径（原样下发，不注入随机密码） |
+| `--no-password` | 什么都不注入（缺省每台节点一个随机 root 密码并记入本地密码库） |
 | `--wait 300s` | 等待节点 active 且公网 IPv4 就绪（轮询）；0 不等待 |
 | `--dry-run` | 只打印创建计划，不调任何 API |
 | `--output` | 结果 JSON 另存路径（stdout 始终输出） |
@@ -92,6 +95,23 @@ vpsctl create \
   "errors": [ { "account": "do-2", "name": "vps-do-2-02", "index": 2, "error": "…" } ]
 }
 ```
+
+### 每台节点一个随机 root 密码
+
+`vpsctl create` 与管理台「创建节点」缺省给**每台节点生成一个互不相同的随机 root 密码**，经
+cloud-init 注入，并记入账号配置旁边的本地密码库 `~/.config/vpsctl/node-passwords.json`
+（0600，按"账号/实例ID"记录）：
+
+- 密码只进本地密码库：不进 create 的结果 JSON，也不回传管理台
+- `list --format nms` 与管理台「导出 NMS 载荷」逐台带各自的密码；密码库里没有记录的节点
+  （存量节点、别的工具建的）回落到账号级 `ssh_password`
+- 要看某台节点的密码：`vpsctl password --ids do-1/3164444`（明文打到 stdout，只在要用时查）
+- 节点销毁时记录一并清掉；重装、改配、关开机后密码不变
+- 不想要随机密码：`--no-password` 什么都不注入——这时裸机保护照旧（没有 `--user-data` /
+  `--ssh-keys` 的机器无法 SSH 管理，要加 `--allow-bare` 放行）；`--user-data` 则原样下发你给的
+  cloud-config。这两种方式下，配了 `ssh_password` 的账号会被拦下：导出会带一个机器上没有的密码
+- 建机前先确认密码库写得进去，写不进去就不建机；建完才发现写不进去的极端情况会把密码打到
+  stderr，请立即保存
 
 ## 节点清单：`vpsctl list`
 
@@ -169,7 +189,7 @@ vpsctl serve --listen 127.0.0.1:9000
   - **重装 / 改配**：与 CLI `rebuild`/`resize` 同语义，弹窗列明细并要求输入台数确认
   - **删除**：销毁磁盘、停止计费、**不可恢复**。弹窗列出明细与释放月费，需**手动输入台数**确认；服务端再校验请求数量一致
   - 删除可选「先优雅关机再删」：关机未完成（超时 120s / errored）则**不删**——宁可漏删，不可误删
-- **创建节点**：工具栏「创建节点…」弹窗里选定账号（以及区域/套餐/镜像/公钥），命名自动续号防重名，月费实时预估；提交后列表自动刷新可见 new → active
+- **创建节点**：工具栏「创建节点…」弹窗里选定账号（以及区域/套餐/镜像/公钥），命名自动续号防重名，月费实时预估；提交后列表自动刷新可见 new → active。每台节点一个随机 root 密码并记入本地密码库（与 CLI 缺省一致）
 - 安全：默认仅监听回环地址、管理台无鉴权（非回环监听会警告）；token 不出后端；
   账号管理与 NMS 载荷下载涉及凭据，服务端额外强制回环校验（非 127.0.0.1 一律 403）
 
@@ -212,9 +232,9 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
 - **系统盘类型**随机型而异、没有稳妥的查询口：建机前用 `DryRun` 逐个试（腾讯云 增强型 SSD →
   高性能云盘 → …；阿里云 ESSD → ESSD Entry → 高效云盘 → …），第一个通过的才真建。`DryRun`
   同时是整体预检，参数 / 库存问题在扣费前就报出来
-- **密码注入**照旧走 cloud-init（`ssh_user` / `ssh_password`）。腾讯云的公共镜像带的是定制版
-  cloud-init 20.1，不认 22.3 才有的 `chpasswd.users` 写法（密码会静默不生效），所以腾讯云建机
-  同时下发老的 `chpasswd.list` 写法。两家 Ubuntu 镜像实测 root 密码都可直接 SSH，重装后密码仍有效
+- **随机 root 密码**照旧经 cloud-init 注入。腾讯云的公共镜像带的是定制版
+  cloud-init 20.1，不认 22.3 才有的 `chpasswd.users` 写法（密码会静默不生效），所以两家建机
+  都同时下发老的 `chpasswd.list` 写法（新版本两种都处理，阿里云 23.2.2 实测）。两家 Ubuntu 镜像实测 root 密码都可直接 SSH，重装后密码仍有效
 - **关开机 / 重装 / 改配后公网 IP 不变**，纳管用的地址不会漂
 - **改配不含磁盘扩容**：只调机型 / 规格，`resize --resize-disk` 直接报错（扩盘请去控制台）。
   改配完成后平台还要收尾一小会儿，这期间的开机请求 vpsctl 会自动等待重试

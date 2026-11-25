@@ -12,6 +12,7 @@ import (
 
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -33,13 +34,14 @@ func runCreate(args []string) error {
 	wait := fs.Duration("wait", 0, "等待节点 active 且公网 IPv4 就绪的最长时间（如 300s；0 不等待）")
 	only := fs.String("only", "", "逗号分隔的账号名：只在指定账号上创建（默认全部账号）")
 	dryRun := fs.Bool("dry-run", false, "只打印创建计划，不调任何 API")
-	allowBare := fs.Bool("allow-bare", false, "放行「无密码且无 user-data/ssh-keys」的裸机创建（缺省 fail-fast，防 P81 裸机交付）")
+	noPassword := fs.Bool("no-password", false, "不注入密码（缺省给每台节点生成一个随机 root 密码，记入账号配置旁边的 node-passwords.json）")
+	allowBare := fs.Bool("allow-bare", false, "放行「不注入密码且无 user-data/ssh-keys」的裸机创建（缺省 fail-fast，防 P81 裸机交付）")
 	output := fs.String("output", "", "结果 JSON 另存路径（stdout 始终输出）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	cfg, _, err := loadAccounts(*accounts)
+	cfg, cfgPath, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
@@ -93,7 +95,12 @@ func runCreate(args []string) error {
 		}
 		opts.UserData = string(b)
 	}
-	if err := injectPasswords(cfg, clients, *userData, splitCSV(*sshKeys), *sshPort, *tunnel443, opts.AuthorizedKeys, *allowBare, &opts); err != nil {
+	generated, err := injectPasswords(provisionParams{
+		cfg: cfg, clients: clients, userDataPath: *userData, sshKeys: splitCSV(*sshKeys),
+		sshPort: *sshPort, tunnel443: *tunnel443, authKeys: opts.AuthorizedKeys,
+		allowBare: *allowBare, noPassword: *noPassword,
+	}, &opts)
+	if err != nil {
 		return err
 	}
 
@@ -109,12 +116,25 @@ func runCreate(args []string) error {
 		}, *output)
 	}
 
+	passwords := nodepass.Open(nodepass.PathFor(cfgPath))
+	if len(generated) > 0 {
+		// 建机前先确认密码库写得进去：真建完才发现写不进去，密码就只留在本次进程的内存里了
+		if err := passwords.CheckWritable(); err != nil {
+			return fmt.Errorf("密码库不可写，未建机: %w", err)
+		}
+	}
 	res, err := fleet.Create(ctx, opts)
 	if err != nil {
 		return err
 	}
 	if err := printJSON(res, *output); err != nil {
 		return err
+	}
+	if err := passwords.RecordOrPrint(res.Created, generated, os.Stderr); err != nil {
+		return fmt.Errorf("节点已创建，但随机密码没能记入密码库（见上方输出，请立即保存）: %w", err)
+	}
+	if n := len(res.Created); len(generated) > 0 && n > 0 {
+		fmt.Fprintf(os.Stderr, "已为 %d 台节点生成随机 root 密码并记入 %s（查看：vpsctl password --ids <账号/实例ID>）\n", n, nodepass.PathFor(cfgPath))
 	}
 	if len(res.Errors) > 0 {
 		return fmt.Errorf("%d 台创建失败（部分节点可能已创建，详见上方 JSON）", len(res.Errors))
@@ -153,52 +173,65 @@ func resolveStartIndex(ctx context.Context, clients []fleet.AccountClient, fs *f
 	return start, nil
 }
 
-// injectPasswords 把选中账号配置的 ssh_password 生成为账号专属 cloud-init
-// （设密码 + 开 SSH 密码登录；sshPort 非缺省时一并注入 sshd 端口）。
-// 与 --user-data 互斥：零依赖没有 YAML 合并能力，两者同给宁可报错，避免密码
-// 悄悄不生效。
+// provisionParams 是 create 决定"每台节点怎么置备"所需的全部输入。
+type provisionParams struct {
+	cfg          *config.File
+	clients      []fleet.AccountClient // 选中的账号
+	userDataPath string                // --user-data：给了就原样下发、不注入密码
+	sshKeys      []string
+	sshPort      int
+	tunnel443    bool
+	authKeys     []string
+	allowBare    bool
+	noPassword   bool // --no-password：什么都不注入
+}
+
+// injectPasswords 决定每台节点拿到的 user-data，返回建机前生成的随机密码（"节点名 →
+// 凭据"，建机成功后由调用方记入密码库）：
 //
-// V1 防呆（92 台轮 P81 裸机交付——无密码账号 + 不传 user-data/ssh-keys = 机器无法
-// SSH 管理，探针负事实升级后拉黑死锁）：账号无 ssh_password ∧ 无 --user-data ∧
-// 无 --ssh-keys 时缺省 fail-fast；--allow-bare 显式放行（降级为 stderr 警告留痕）。
-func injectPasswords(cfg *config.File, clients []fleet.AccountClient, userDataPath string, sshKeys []string, sshPort int, tunnel443 bool, authKeys []string, allowBare bool, opts *fleet.Options) error {
-	byName := make(map[string]config.Account, len(cfg.Accounts))
-	for _, a := range cfg.Accounts {
+//   - 缺省：每台节点一个随机 root 密码，不依赖账号有没有配 ssh_password；
+//   - 给了 --user-data：原样下发、不注入密码；
+//   - --no-password：什么都不注入。
+//
+// 后两种情况下账号若配了固定密码必须拦下：导出 NMS 载荷会回落到那个固定密码，而
+// 机器上并没有它。同理还有裸机保护（V1 / P81）——不注入密码、没有 user-data、没有
+// ssh-keys 的机器无法 SSH 管理，缺省 fail-fast，--allow-bare 显式放行。
+func injectPasswords(p provisionParams, opts *fleet.Options) (map[string]nodepass.Entry, error) {
+	byName := make(map[string]config.Account, len(p.cfg.Accounts))
+	for _, a := range p.cfg.Accounts {
 		byName[a.Name] = a
 	}
-	var bare []string
-	for _, c := range clients {
-		a := byName[c.Name]
-		if a.SSHPassword == "" {
-			if userDataPath == "" && len(sshKeys) == 0 {
+	if p.userDataPath != "" || p.noPassword {
+		var bare, fixed []string
+		for _, c := range p.clients {
+			if byName[c.Name].SSHPassword != "" {
+				fixed = append(fixed, c.Name)
+			} else if p.userDataPath == "" && len(p.sshKeys) == 0 {
 				bare = append(bare, c.Name)
 			}
-			continue
 		}
-		if userDataPath != "" {
-			return fmt.Errorf("账号 %s 配置了 ssh_password，与 --user-data 互斥：请把密码并入该 cloud-config 后去掉其一", c.Name)
+		if len(fixed) > 0 {
+			what := "--no-password"
+			if p.userDataPath != "" {
+				what = "--user-data"
+			}
+			return nil, fmt.Errorf("账号 %v 配置了 ssh_password，与 %s 互斥：这次建机不会把账号密码注入机器，导出 NMS 载荷却会带上它。请去掉账号的 ssh_password（新节点的密码由 vpsctl 随机生成），或改用缺省的随机密码", fixed, what)
 		}
-		ud, err := fleet.CloudInitSpec(fleet.CloudInitParams{
-			User: a.SSHUser, Password: a.SSHPassword, SSHPort: sshPort, Tunnel443: tunnel443,
-			AuthorizedKeys: authKeys,
-			ChpasswdCompat: provider.ChpasswdCompat(a.Provider), // 镜像的 cloud-init 可能不认 users 写法
-		})
-		if err != nil {
-			return fmt.Errorf("账号 %s: %w", c.Name, err)
+		if len(bare) > 0 {
+			msg := fmt.Sprintf("账号 %v 不注入密码且未提供 --user-data/--ssh-keys：机器将无法通过密码/密钥 SSH 管理", bare)
+			if !p.allowBare {
+				return nil, fmt.Errorf("%s——确认要裸机创建请加 --allow-bare", msg)
+			}
+			fmt.Fprintf(os.Stderr, "警告：%s（--allow-bare 放行）\n", msg)
 		}
-		if opts.UserDataByAccount == nil {
-			opts.UserDataByAccount = map[string]string{}
-		}
-		opts.UserDataByAccount[c.Name] = ud
+		return nil, nil
 	}
-	if len(bare) > 0 {
-		msg := fmt.Sprintf("账号 %v 无 ssh_password 且未提供 --user-data/--ssh-keys：机器将无法通过密码/密钥 SSH 管理", bare)
-		if !allowBare {
-			return fmt.Errorf("%s——确认要裸机创建请加 --allow-bare", msg)
-		}
-		fmt.Fprintf(os.Stderr, "警告：%s（--allow-bare 放行）\n", msg)
+	specs := make(map[string]nodepass.Spec, len(p.clients))
+	for _, c := range p.clients {
+		a := byName[c.Name]
+		specs[c.Name] = nodepass.Spec{User: a.SSHUser, ChpasswdCompat: provider.ChpasswdCompat(a.Provider)}
 	}
-	return nil
+	return nodepass.Provision(opts, specs)
 }
 
 // printJSON 输出缩进 JSON 到 stdout，path 非空时另存一份。

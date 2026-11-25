@@ -42,7 +42,11 @@ type Payload struct {
 	Nodes []Node `json:"nodes"`
 }
 
-// Nodes 把跨账号节点渲染为载荷节点列表，按账号名、节点名排序。
+// NodePassword 按账号与实例 ID 取某台节点自己的登录凭据（vpsctl 建机时生成的随机
+// 密码）。没有记录时返回 false，回落到账号级的 ssh_user / ssh_password（存量节点）。
+type NodePassword func(account, id string) (user, password string, ok bool)
+
+// Nodes 把跨账号节点渲染为载荷节点列表，按账号名、节点名排序。nodePass 可为 nil。
 // accounts 缺某账号时凭据落缺省（root / 空密码），由调用方决定是否告警。
 //
 // ssh_port 取值优先级（2026-09-23，把端口所有权从外部编排收进 vpsctl）：
@@ -51,7 +55,7 @@ type Payload struct {
 //  3. 都缺省回退 22。
 //
 // NMS 导入侧对缺省载荷回退 22（topology/service.go），高位口 fleet 必须显式带上。
-func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int) []Node {
+func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int, nodePass NodePassword) []Node {
 	if sshPort == 0 {
 		sshPort = 22
 	}
@@ -72,6 +76,15 @@ func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int)
 		if user == "" {
 			user = "root"
 		}
+		password := ac.SSHPassword
+		if nodePass != nil {
+			if u, pw, ok := nodePass(s.Account, s.ID); ok {
+				password = pw
+				if u != "" {
+					user = u
+				}
+			}
+		}
 		port := sshPort
 		if s.SSHPort != 0 {
 			port = s.SSHPort
@@ -83,7 +96,7 @@ func Nodes(servers []fleet.ServerJSON, accounts map[string]Account, sshPort int)
 			ManagementIP:  s.IPv4Public,
 			SSHPort:       port,
 			SSHUser:       user,
-			SSHPassword:   ac.SSHPassword,
+			SSHPassword:   password,
 			Region:        s.Region,
 			Provider:      ac.Provider,
 			RAMMB:         s.MemoryMB,

@@ -19,6 +19,7 @@ import (
 	"github.com/hoshinojian/vpsctl/internal/config"
 	"github.com/hoshinojian/vpsctl/internal/fleet"
 	"github.com/hoshinojian/vpsctl/internal/nms"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
@@ -32,6 +33,7 @@ type Server struct {
 	byAccount map[string]provider.Provider
 	cfg       *config.File // 账号配置（NMS 导出凭据来源 + 新增账号落盘）
 	cfgPath   string
+	passPath  string // 节点随机密码库（accounts.json 旁边的 node-passwords.json）
 
 	// newProvider 可注入（测试）；生产为 provider.New
 	newProvider func(providerName, account string, cred provider.Credentials) (provider.Provider, error)
@@ -75,6 +77,7 @@ func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Serve
 		byAccount: byAccount,
 		cfg:       cfg,
 		cfgPath:   cfgPath,
+		passPath:  nodepass.PathFor(cfgPath),
 		newProvider: func(name, account string, cred provider.Credentials) (provider.Provider, error) {
 			return provider.New(name, account, cred, nil)
 		},
@@ -154,6 +157,9 @@ type target struct {
 type uiDroplet struct {
 	fleet.ServerJSON
 	Provider string `json:"provider"`
+	// HasPassword：这台节点导出 NMS 载荷时有密码可用（建机时生成的随机密码，或账号级
+	// 配置）。密码本身永不回传。
+	HasPassword bool `json:"has_password"`
 }
 
 type accountError struct {
@@ -225,7 +231,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Prefix == "" {
 		req.Prefix = "vps"
 	}
-	clients, _, _ := s.snapshot()
+	clients, _, cfg := s.snapshot()
 	clients, err := fleet.SelectClients(clients, []string{req.Account})
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
@@ -235,17 +241,40 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if servers, err := clients[0].Provider.List(r.Context()); err == nil {
 		start = fleet.NextStartIndex(servers, req.Prefix, req.Account, req.Region)
 	}
-	res, err := fleet.Create(r.Context(), fleet.Options{
+	opts := fleet.Options{
 		Clients: clients, Count: req.Count, Prefix: req.Prefix, StartIndex: start,
 		Region: req.Region, Size: req.Size, Image: req.Image,
 		SSHKeys: req.SSHKeys, Monitoring: true,
-	})
+	}
+	// 管理台建机一律给每台节点一个随机 root 密码（与 CLI 缺省一致）：不注入的话建出来的
+	// 是没法纳管的裸机
+	specs := make(map[string]nodepass.Spec, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		specs[a.Name] = nodepass.Spec{User: a.SSHUser, ChpasswdCompat: provider.ChpasswdCompat(a.Provider)}
+	}
+	generated, err := nodepass.Provision(&opts, specs)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.logOp("create", fmt.Sprintf("创建 %d 台（%s/%s）", len(res.Created), req.Region, req.Size),
-		len(res.Created), len(res.Errors))
+	passwords := nodepass.Open(s.passPath)
+	// 建机前先确认密码库写得进去：真建完才发现写不进去，密码就只留在本次进程的内存里了
+	if err := passwords.CheckWritable(); err != nil {
+		httpError(w, http.StatusInternalServerError, "密码库不可写，未建机: "+err.Error())
+		return
+	}
+	res, err := fleet.Create(r.Context(), opts)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// 落库失败时密码已打到 serve 的终端（RecordOrPrint）；节点是真建出来了，结果照常返回
+	recordErr := passwords.RecordOrPrint(res.Created, generated, os.Stderr)
+	detail := fmt.Sprintf("创建 %d 台（%s/%s）", len(res.Created), req.Region, req.Size)
+	if recordErr != nil {
+		detail += "；随机密码没能记入密码库，见 serve 终端输出"
+	}
+	s.logOp("create", detail, len(res.Created), len(res.Errors))
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -307,7 +336,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDroplets(w http.ResponseWriter, r *http.Request) {
-	clients, _, _ := s.snapshot()
+	clients, _, cfg := s.snapshot()
 	out := make([][]uiDroplet, len(clients))
 	errs := make([]accountError, len(clients))
 	var wg sync.WaitGroup
@@ -327,6 +356,11 @@ func (s *Server) handleDroplets(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
+	// 节点有没有可用密码只影响详情里的一行提示：密码库读不了就当都没有，不拖垮清单
+	stored, err := nodepass.Open(s.passPath).Load()
+	if err != nil {
+		stored = nil
+	}
 	resp := listResponse{}
 	for _, d := range out {
 		resp.Droplets = append(resp.Droplets, d...)
@@ -335,6 +369,11 @@ func (s *Server) handleDroplets(w http.ResponseWriter, r *http.Request) {
 		if e.Account != "" {
 			resp.Errors = append(resp.Errors, e)
 		}
+	}
+	for i := range resp.Droplets {
+		d := &resp.Droplets[i]
+		_, own := stored[nodepass.Key(d.Account, d.ID)]
+		d.HasPassword = own || cfg.Find(d.Account) != nil && cfg.Find(d.Account).SSHPassword != ""
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -398,6 +437,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		Wait:          s.deleteWait,
 		Poll:          s.pollEvery,
 	})
+	// 节点已销毁：建机时生成的随机密码记录一并清掉（清不掉只告警，不影响删除结果）
+	if err := nodepass.Open(s.passPath).ForgetAll(deletedTargets(res)); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 清理密码库失败: %v\n", err)
+	}
 	ok, fail := 0, 0
 	for _, x := range res {
 		if x.OK {
@@ -485,6 +528,17 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 		results[i] = opResult{Account: x.Account, ID: x.ID, OK: x.OK, Error: x.Error}
 	}
 	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
+}
+
+// deletedTargets 取删除结果中成功的台——它们的随机密码记录可以清掉了。
+func deletedTargets(res []fleet.OpResult) []fleet.Target {
+	var out []fleet.Target
+	for _, r := range res {
+		if r.OK {
+			out = append(out, fleet.Target{Account: r.Account, ID: r.ID})
+		}
+	}
+	return out
 }
 
 func toFleetTargets(ts []target) []fleet.Target {
@@ -771,6 +825,17 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 	for _, a := range cfg.Accounts {
 		accts[a.Name] = nms.Account{Provider: a.Provider, SSHUser: a.SSHUser, SSHPassword: a.SSHPassword}
 	}
+	// 密码逐台取：建机时生成的随机密码优先，没有记录的（存量节点）回落到账号级配置。
+	// 密码库读不了就中止导出——宁可不出载荷，也不能带出错的密码。
+	stored, err := nodepass.Open(s.passPath).Load()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "读取密码库失败: "+err.Error())
+		return
+	}
+	nodePass := func(account, id string) (string, string, bool) {
+		e, ok := stored[nodepass.Key(account, id)]
+		return e.User, e.Password, ok
+	}
 	var (
 		keep    []fleet.ServerJSON
 		skipped int
@@ -805,7 +870,7 @@ func (s *Server) handleNMSPayload(w http.ResponseWriter, r *http.Request) {
 	s.logOp("export", fmt.Sprintf("导出 NMS 载荷 %d 台（无 IP 跳过 %d，SSH 不可达跳过 %d）", len(keep), skipped, unreachable), 1, 0)
 	w.Header().Set("X-Vpsctl-Unreachable", strconv.Itoa(unreachable))
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts, 0)})
+	_ = json.NewEncoder(w).Encode(nms.Payload{Nodes: nms.Nodes(keep, accts, 0, nodePass)})
 }
 
 // handleOperations 返回最近的操作历史（内存态，serve 重启即清）。

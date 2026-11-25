@@ -22,6 +22,7 @@ const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean / 腾讯云 CVM
   vpsctl serve [flags]              本地 Web 管理台（查看/关机/开机/删除）
   vpsctl accounts list|add|edit|remove
                                     账号配置管理
+  vpsctl password --ids 账号/实例ID  查看建机时生成的节点随机密码（读本机密码库）
   vpsctl regions|sizes|images|keys  查询各账号可选值
 
 子命令帮助: vpsctl <子命令> -h
@@ -54,6 +55,8 @@ func main() {
 		die(runResize(os.Args[2:]))
 	case "accounts":
 		die(runAccounts(os.Args[2:]))
+	case "password":
+		die(runPassword(os.Args[2:]))
 	case "serve":
 		die(runServe(os.Args[2:]))
 	case "regions", "sizes", "images", "keys":

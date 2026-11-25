@@ -23,7 +23,7 @@ func server(account, name, ip string) fleet.ServerJSON {
 func accounts(entries map[string]Account) map[string]Account { return entries }
 
 func TestNodesIDIsName(t *testing.T) {
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("节点数 = %d, want 1", len(got))
 	}
@@ -37,7 +37,7 @@ func TestNodesIDIsName(t *testing.T) {
 }
 
 func TestNodesDefaults(t *testing.T) {
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 0, nil)
 	n := got[0]
 	if n.DeviceType != "vps" {
 		t.Errorf("device_type = %q, want vps", n.DeviceType)
@@ -59,7 +59,7 @@ func TestNodesDefaults(t *testing.T) {
 // TestNodesHighPort：高位口 fleet（rl-drill v3.4 全 fleet SSHD_PORT 迁移）载荷必须
 // 逐节点携带该端口——NMS 导入缺省回退 22（topology/service.go），漏带即整批死台账。
 func TestNodesHighPort(t *testing.T) {
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 40222)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, nil, 40222, nil)
 	if got[0].SSHPort != 40222 {
 		t.Errorf("ssh_port = %d, want 40222（显式传入）", got[0].SSHPort)
 	}
@@ -70,13 +70,13 @@ func TestNodesHighPort(t *testing.T) {
 func TestNodesPerNodePortOverridesGlobal(t *testing.T) {
 	s := server("do-1", "vps-do-1-01", "203.0.113.10")
 	s.SSHPort = 40222
-	got := Nodes([]fleet.ServerJSON{s}, nil, 22)
+	got := Nodes([]fleet.ServerJSON{s}, nil, 22, nil)
 	if got[0].SSHPort != 40222 {
 		t.Errorf("ssh_port = %d, want 40222（节点自带优先于全局 22）", got[0].SSHPort)
 	}
 	// 节点未带端口时全局兜底
 	s.SSHPort = 0
-	got = Nodes([]fleet.ServerJSON{s}, nil, 40222)
+	got = Nodes([]fleet.ServerJSON{s}, nil, 40222, nil)
 	if got[0].SSHPort != 40222 {
 		t.Errorf("ssh_port = %d, want 40222（无自带端口回落全局）", got[0].SSHPort)
 	}
@@ -86,13 +86,13 @@ func TestNodesCredentialFromAccount(t *testing.T) {
 	creds := accounts(map[string]Account{
 		"do-1": {Provider: "digitalocean", SSHUser: "deploy", SSHPassword: "s3cret"},
 	})
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0, nil)
 	n := got[0]
 	if n.SSHUser != "deploy" || n.SSHPassword != "s3cret" {
 		t.Errorf("凭据未注入: user=%q password=%q", n.SSHUser, n.SSHPassword)
 	}
 	// 未配置凭据的账号落回缺省，密码留空（由调用方决定是否告警）
-	got = Nodes([]fleet.ServerJSON{server("do-2", "vps-do-2-01", "203.0.113.11")}, creds, 0)
+	got = Nodes([]fleet.ServerJSON{server("do-2", "vps-do-2-01", "203.0.113.11")}, creds, 0, nil)
 	if got[0].SSHUser != "root" || got[0].SSHPassword != "" {
 		t.Errorf("无凭据账号应落缺省: %+v", got[0])
 	}
@@ -100,7 +100,7 @@ func TestNodesCredentialFromAccount(t *testing.T) {
 
 func TestNodesCarryHardwareAndProvider(t *testing.T) {
 	creds := accounts(map[string]Account{"do-1": {Provider: "digitalocean"}})
-	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0)
+	got := Nodes([]fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}, creds, 0, nil)
 	n := got[0]
 	if n.Provider != "digitalocean" {
 		t.Errorf("provider = %q", n.Provider)
@@ -119,7 +119,7 @@ func TestNodesSortedByAccountThenName(t *testing.T) {
 		server("do-1", "vps-do-1-02", "203.0.113.10"),
 		server("do-1", "vps-do-1-01", "203.0.113.9"),
 	}
-	got := Nodes(servers, nil, 0)
+	got := Nodes(servers, nil, 0, nil)
 	want := []string{"vps-do-1-01", "vps-do-1-02", "vps-do-2-01"}
 	for i, n := range got {
 		if n.Name != want[i] {
@@ -131,7 +131,7 @@ func TestNodesSortedByAccountThenName(t *testing.T) {
 func TestPayloadJSONShape(t *testing.T) {
 	servers := []fleet.ServerJSON{server("do-1", "vps-do-1-01", "203.0.113.10")}
 	creds := accounts(map[string]Account{"do-1": {Provider: "digitalocean", SSHPassword: "pw"}})
-	b, err := json.Marshal(Payload{Nodes: Nodes(servers, creds, 0)})
+	b, err := json.Marshal(Payload{Nodes: Nodes(servers, creds, 0, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +148,44 @@ func TestPayloadJSONShape(t *testing.T) {
 		"ssh_port", "ssh_user", "ssh_password", "region", "provider"} {
 		if _, ok := n[k]; !ok {
 			t.Errorf("缺字段 %q: %s", k, b)
+		}
+	}
+}
+
+// TestNodesPerNodePassword：vpsctl 建机时给每台节点生成的随机密码逐台生效（用户名随
+// 记录走）；密码库里没有记录的节点回落到账号级配置。
+func TestNodesPerNodePassword(t *testing.T) {
+	servers := []fleet.ServerJSON{
+		server("do-1", "vps-do-1-01", "203.0.113.10"),
+		server("do-1", "vps-do-1-02", "203.0.113.11"),
+		server("do-2", "vps-do-2-01", "203.0.113.12"),
+	}
+	servers[0].ID, servers[1].ID, servers[2].ID = "ins-1", "ins-2", "ins-3"
+	creds := accounts(map[string]Account{
+		"do-1": {Provider: "digitalocean", SSHUser: "deploy", SSHPassword: "fixed-pw"},
+		"do-2": {Provider: "digitalocean"},
+	})
+	lookup := func(account, id string) (string, string, bool) {
+		switch account + "/" + id {
+		case "do-1/ins-1":
+			return "root", "random-1", true
+		case "do-2/ins-3":
+			return "", "random-3", true // 记录里没写用户：沿用账号的（这里缺省 root）
+		}
+		return "", "", false
+	}
+	got := Nodes(servers, creds, 0, lookup)
+	want := []struct{ user, password string }{
+		{"root", "random-1"},   // 有记录：用节点自己的
+		{"deploy", "fixed-pw"}, // 没记录：回落账号级
+		{"root", "random-3"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("nodes = %+v", got)
+	}
+	for i, w := range want {
+		if got[i].SSHUser != w.user || got[i].SSHPassword != w.password {
+			t.Errorf("nodes[%d] = %s/%s, want %s/%s", i, got[i].SSHUser, got[i].SSHPassword, w.user, w.password)
 		}
 	}
 }
