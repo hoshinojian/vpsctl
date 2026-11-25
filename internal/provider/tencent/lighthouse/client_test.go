@@ -217,6 +217,18 @@ func TestRootLoginScript(t *testing.T) {
 	if strings.Contains(rootLoginScript, "chpasswd") || strings.Contains(rootLoginScript, "passwd root") {
 		t.Error("脚本不应自行设置明文密码（只能复制密码哈希）")
 	}
+	// sshd 对每条指令取先读到的值，sshd_config.d 的分片又排在主配置之前：分片必须排在
+	// 最前（00-），否则会被镜像自带的 50-cloud-init.conf / 60-cloudimg-settings.conf
+	// （PasswordAuthentication no）压住，root 密码登录照样打不开。
+	if !strings.Contains(rootLoginScript, "/etc/ssh/sshd_config.d/00-vpsctl-root.conf") {
+		t.Error("脚本写入的 sshd 分片应以 00- 开头，保证最先被读到")
+	}
+	for i := 0; i+1 < len(rootLoginScript); i++ {
+		if rootLoginScript[i] == '/' && strings.HasPrefix(rootLoginScript[i:], "/etc/ssh/sshd_config.d/") &&
+			!strings.HasPrefix(rootLoginScript[i:], "/etc/ssh/sshd_config.d/00-") {
+			t.Errorf("脚本写了不以 00- 开头的 sshd 分片: %q", rootLoginScript[i:i+34])
+		}
+	}
 }
 
 // TestCreateDryRunFailureAborts：预检不过就不真建——建一次就付一个月，不能带病下单。

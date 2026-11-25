@@ -43,6 +43,10 @@ const (
 // 镜像的默认用户上（Ubuntu 是 ubuntu），root 默认禁用 SSH 登录；这里等默认用户的密码
 // 落盘后把密码**哈希**原样复制给 root——命令内容会留在平台的命令记录里，所以绝不能
 // 让明文密码出现在里面。纯 ASCII：不依赖镜像的语言环境。
+//
+// sshd 对每条指令取先读到的值，sshd_config.d 的分片又排在主配置之前：分片用 00- 前缀
+// 保证最先被读到——Ubuntu 云镜像自带的 50-cloud-init.conf / 60-cloudimg-settings.conf
+// 里是 PasswordAuthentication no，排在它们后面（99-）会被压住。
 const rootLoginScript = `#!/bin/bash
 # vpsctl: allow root to log in with the password the platform set on the image's default user.
 hash=""
@@ -59,7 +63,7 @@ if awk -F: '$1 == "root" && ($2 == "" || $2 ~ /^[!*]/) {found = 1} END {exit !fo
   usermod -p "$hash" root
 fi
 if [ -d /etc/ssh/sshd_config.d ]; then
-  printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/99-vpsctl-root.conf
+  printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/00-vpsctl-root.conf
 elif grep -qE '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config; then
   sed -i -E 's/^[[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 else
