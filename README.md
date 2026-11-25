@@ -285,8 +285,9 @@ vpsctl rebuild --only lh-1 --ids lh-1/<实例ID> --image debian-12 --confirm 1
 - **只能升配、不能降配**：`resize` 换更贵的套餐；`--resize-disk` 报错（要更大的盘选磁盘更大的套餐）。
   降配会被平台拒（错误原文是没营养的 `Modify instances bundle failed. Please try again later.`），
   而编排是"关机 → 升配 → 开机"，失败就停在关机状态，需要手动 `vpsctl power --action on`
-- **停机**：`vpsctl delete`（销毁，退款按平台的退还规则走）。不想续费了也可以先在控制台
-  关掉自动续费
+- **停机**：`vpsctl delete`（销毁）。包年包月实例平台要求两步：先 `IsolateInstances` 退还
+  （实例进入 `SHUTDOWN`，退款流程随之启动），再 `TerminateInstances` 真正销毁——直接发
+  销毁请求对运行中和已关机的实例都会被拒。不想续费了也可以先在控制台关掉自动续费
 - **不支持靠 cloud-init 的置备**：自定义 `--user-data`、高位口（`--ssh-port`）、443 隧道、
   `--authorized-keys` 都会在建机前被明确拒绝；登录密钥用 `--ssh-keys`
 - **随机 root 密码走平台的"登录密码"**：平台的密码落在镜像的默认用户上（Ubuntu 是
@@ -301,11 +302,13 @@ vpsctl rebuild --only lh-1 --ids lh-1/<实例ID> --image debian-12 --confirm 1
 
 > **真机验证（2026-11-25，广州，`bundle_starter_mc_med2_03`→`med2_04`，验完已销毁）。**
 > 建机 + 注入随机密码、root 用密码库里的密码 SSH 登录、关机（8s）/ 开机（7s，公网 IP 不变）、
-> 升配（70s）、重装（128s）、销毁都在真实账号上跑过。建机时那条初始化命令确实执行了：镜像里
-> 出现了 `00-vpsctl-root.conf`，root 的密码哈希与 `ubuntu` 用户逐字节相同。
+> 升配（70s）、重装（128s）、销毁（58s）都在真实账号上跑过。建机时那条初始化命令确实执行了：
+> 镜像里出现了 `00-vpsctl-root.conf`，root 的密码哈希与 `ubuntu` 用户逐字节相同。
 >
-> 重装是这一轮唯一踩到的坑：**`ResetInstance` 不会重跑初始化命令**，所以最初的重装会把 root
-> 登录彻底抹掉（root、ubuntu 两个用户都不认那把密码，等 7 分钟无效）。已修成上面那条语义。
+> 这一轮踩到两个坑，都已修：**`ResetInstance` 不会重跑初始化命令**，最初的重装会把 root 登录
+> 彻底抹掉（root、ubuntu 两个用户都不认那把密码，等 7 分钟无效）；**`TerminateInstances`
+> 只接受 `SHUTDOWN` 状态的实例**，最初的 `delete` 对运行中和已关机的实例都报
+> `UnsupportedOperation.InvalidInstanceState`，也就是销毁接口原本完全不可用。
 > 另外注意两点：**重装会换 SSH host key**（缓存过指纹的地方要重新接受）；API 建出来的实例
 > 默认放行 22 端口，没有额外防火墙配置。
 

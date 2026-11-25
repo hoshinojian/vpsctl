@@ -503,12 +503,55 @@ func TestDelete(t *testing.T) {
 	if !slices.Equal(f.lastIDs("TerminateInstances"), []any{"lhins-a"}) {
 		t.Errorf("TerminateInstances 应只带目标实例: %v", f.lastIDs("TerminateInstances"))
 	}
+	// 包年包月要先退还（IsolateInstances）进入 SHUTDOWN，才能销毁；顺序不能反
+	if !slices.Equal(f.lastIDs("IsolateInstances"), []any{"lhins-a"}) {
+		t.Errorf("销毁前应先退还: %v", f.lastIDs("IsolateInstances"))
+	}
+	actions := f.actions()
+	if i, j := slices.Index(actions, "ap-guangzhou IsolateInstances"), slices.Index(actions, "ap-guangzhou TerminateInstances"); i < 0 || j < i {
+		t.Errorf("退还应在销毁之前: %v", actions)
+	}
 	// 已不存在视为成功；未登记过的 ID 也能自己找到地域
 	if err := c.Delete(ctx, "lhins-a"); err != nil {
 		t.Errorf("销毁已不存在的实例应视为成功, got %v", err)
 	}
 	if err := c.Delete(ctx, "lhins-b"); err != nil || f.instances["lhins-b"] != nil {
 		t.Errorf("未登记索引的实例应能定位并销毁: %v", err)
+	}
+}
+
+// 上一次退还已经完成（实例停在 SHUTDOWN）时，直接销毁，不重复退还——重复退还会被平台
+// 以"状态不支持"拒绝。
+func TestDeleteAlreadyIsolated(t *testing.T) {
+	f, c := seeded(t)
+	inst := f.add(runningInstance("lhins-a", "ap-guangzhou"))
+	inst.state = "SHUTDOWN"
+	ctx := context.Background()
+	if err := c.Delete(ctx, "lhins-a"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if f.instances["lhins-a"] != nil {
+		t.Error("实例未被销毁")
+	}
+	if ids := f.lastIDs("IsolateInstances"); len(ids) != 0 {
+		t.Errorf("已退还的实例不应再发退还请求: %v", ids)
+	}
+}
+
+// 退还本身被平台拒绝时必须报错，不能说成销毁成功。
+func TestDeleteIsolateRejected(t *testing.T) {
+	f, c := seeded(t)
+	f.add(runningInstance("lhins-a", "ap-guangzhou"))
+	f.isolateReject = true
+	err := c.Delete(context.Background(), "lhins-a")
+	if err == nil || !strings.Contains(err.Error(), "退还实例失败") || !strings.Contains(err.Error(), "not returnable") {
+		t.Fatalf("退还被拒应带出平台原因, got %v", err)
+	}
+	if f.instances["lhins-a"] == nil {
+		t.Error("退还失败时实例应还在")
+	}
+	if ids := f.lastIDs("TerminateInstances"); len(ids) != 0 {
+		t.Errorf("退还失败不应继续销毁: %v", ids)
 	}
 }
 

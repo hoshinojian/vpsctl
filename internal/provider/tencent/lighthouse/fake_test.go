@@ -31,6 +31,7 @@ type fakeAPI struct {
 	dryRunCode     string           // 非空时 CreateInstances 的 DryRun 返回这个错误码
 	resetReject    bool
 	resetAutoStart bool
+	isolateReject  bool
 	busyStarts     int // 接下来这么多次开机请求被"操作进行中"拒绝
 }
 
@@ -216,7 +217,29 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			inst.pending = &pendingOp{2, func(i *fakeInstance) { i.state, i.opState = "STOPPED", "SUCCESS" }}
 		})
 		f.write(w, map[string]any{})
+	case "IsolateInstances":
+		if f.isolateReject {
+			f.fail(w, "UnsupportedOperation.ResourceNotReturnable", "resource not returnable")
+			return
+		}
+		f.each(body, func(inst *fakeInstance) {
+			inst.latestOp, inst.opState = "IsolateInstances", "OPERATING"
+			inst.pending = &pendingOp{2, func(i *fakeInstance) { i.state, i.opState = "SHUTDOWN", "SUCCESS" }}
+		})
+		f.write(w, map[string]any{})
 	case "TerminateInstances":
+		// 平台只接受 SHUTDOWN 状态的实例：运行中 / 已关机的都拒绝（真机验证时踩到的语义）
+		var bad, badState string
+		f.each(body, func(inst *fakeInstance) {
+			if inst.state != "SHUTDOWN" && bad == "" {
+				bad, badState = inst.id, inst.state
+			}
+		})
+		if bad != "" {
+			f.fail(w, "UnsupportedOperation.InvalidInstanceState",
+				"The instance `"+bad+"` is in `"+badState+"` state and does not support this operation.")
+			return
+		}
 		f.each(body, func(inst *fakeInstance) { delete(f.instances, inst.id) })
 		f.write(w, map[string]any{})
 	case "ResetInstance":

@@ -446,7 +446,14 @@ func (c *Client) Resize(ctx context.Context, id, size string, resizeDisk bool) (
 	return provider.EncodeActionRef(region, id, kindResize, size), err
 }
 
-// Delete 销毁实例（包年包月的退款按平台的退还规则走）；已不存在视为成功。
+// Delete 销毁实例；已不存在视为成功。
+//
+// 轻量应用服务器是包年包月产品，平台把"销毁"拆成两步：IsolateInstances 先把实例退还
+// （进入 SHUTDOWN，退款流程随之启动），TerminateInstances 才真正销毁，而后者只接受
+// SHUTDOWN 状态的实例。直接发 TerminateInstances 对运行中和已关机的实例都会报
+// UnsupportedOperation.InvalidInstanceState——真机验证时踩到，即销毁接口原本完全不可用。
+//
+// 退还本身被平台拒绝（例如套餐不支持自助退还）时把平台原文带出来，不谎报成功。
 func (c *Client) Delete(ctx context.Context, id string) error {
 	region, ok := c.index.Get(id)
 	if !ok {
@@ -458,7 +465,32 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	err := c.api.Call(ctx, host, service, version, "TerminateInstances", region,
+	inst, err := c.describe(ctx, region, id)
+	switch {
+	case errors.Is(err, errNotFound):
+		return nil
+	case err != nil:
+		return err
+	}
+	if inst.InstanceState != "SHUTDOWN" {
+		err = c.api.Call(ctx, host, service, version, "IsolateInstances", region,
+			map[string]any{"InstanceIds": []string{id}}, nil)
+		switch {
+		case tencent.IsCode(err, "ResourceNotFound.InstanceNotFound"):
+			return nil
+		case err != nil:
+			return fmt.Errorf("退还实例失败（尚未销毁）: %w", err)
+		}
+		if err := c.waitInstance(ctx, region, id, func(i instance) (bool, error) {
+			if err := failed(i, "IsolateInstances"); err != nil {
+				return true, err
+			}
+			return i.InstanceState == "SHUTDOWN", nil
+		}); err != nil {
+			return fmt.Errorf("实例未进入 SHUTDOWN，未发起销毁: %w", err)
+		}
+	}
+	err = c.api.Call(ctx, host, service, version, "TerminateInstances", region,
 		map[string]any{"InstanceIds": []string{id}}, nil)
 	if tencent.IsCode(err, "ResourceNotFound.InstanceNotFound") {
 		return nil
