@@ -29,7 +29,7 @@ func testDroplet(id int) droplet {
 		ID: id, Name: fmt.Sprintf("node-%02d", id), Memory: 1024, VCPUs: 1, Disk: 25,
 		Region:    region{Slug: "sgp1", Name: "Singapore 1", Available: true},
 		Image:     image{Slug: "ubuntu-24-04-x64", Distribution: "Ubuntu", Name: "24.04 x64"},
-		Size:      size{Slug: "s-1vcpu-1gb", PriceMonthly: 6},
+		Size:      size{Slug: "s-1vcpu-1gb", PriceMonthly: 6, PriceHourly: 0.00893},
 		SizeSlug:  "s-1vcpu-1gb",
 		Status:    "active",
 		CreatedAt: "2026-09-04T00:00:00Z",
@@ -107,6 +107,10 @@ func TestListPagination(t *testing.T) {
 		s.PriceMonthly != 6 || s.MemoryMB != 1024 || s.VCPUs != 1 || s.DiskGB != 25 {
 		t.Errorf("字段映射不符: %+v", s)
 	}
+	// DO 是按量计费：月价是官方标价，小时价也是 API 给的（不是拿月价折算的）
+	if s.Billing != provider.BillingHourly || s.PriceHourly != 0.00893 {
+		t.Errorf("计费方式 / 小时价不符: billing=%q hourly=%v", s.Billing, s.PriceHourly)
+	}
 	if s.CreatedAt.IsZero() {
 		t.Error("CreatedAt 未解析")
 	}
@@ -134,6 +138,19 @@ func TestToServerGeoCoords(t *testing.T) {
 	s2 := c.toServer(unknown)
 	if s2.Lat != 0 || s2.Lng != 0 {
 		t.Errorf("未知区域坐标应为零, got lat=%v lng=%v", s2.Lat, s2.Lng)
+	}
+}
+
+// DO 后来新增的区域（Atlanta / Richmond / Kansas City / Memphis）也要有坐标，否则这些节点
+// 在管理台的地图上进"未定位"。
+func TestToServerGeoCoordsNewRegions(t *testing.T) {
+	c := &Client{account: "acct-1"}
+	for _, slug := range []string{"atl1", "ric1", "mkc1", "mem1"} {
+		d := testDroplet(1)
+		d.Region = region{Slug: slug, Available: true}
+		if s := c.toServer(d); s.Lat == 0 || s.Lng == 0 {
+			t.Errorf("区域 %s 应有坐标, got lat=%v lng=%v", slug, s.Lat, s.Lng)
+		}
 	}
 }
 

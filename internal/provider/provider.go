@@ -19,6 +19,16 @@ const (
 	Shutdown = "shutdown" // 优雅关机，依赖 guest 响应，可能超时
 )
 
+// 计费方式（Server.Billing）。
+const (
+	// BillingHourly 是按量计费：按小时扣费、随建随删。PriceMonthly 是估算值
+	// （小时单价 × HoursPerMonth；DO 例外，是它的官方月价），实际扣多少要看 PriceHourly。
+	BillingHourly = "hourly"
+	// BillingMonthly 是包年包月：一次付一个月或更长，到期要续费。PriceMonthly 是
+	// "续一个月要多少钱"，不是当初的实付价（实付要走云厂商的账单，本工具不查）。
+	BillingMonthly = "monthly"
+)
+
 // Server 是提供商侧一台虚拟机的统一视图。
 type Server struct {
 	ID           string  // 提供商内唯一 ID（DO 为十进制数字串）
@@ -31,7 +41,12 @@ type Server struct {
 	VCPUs        int     //
 	MemoryMB     int     //
 	DiskGB       int     //
-	PriceMonthly float64 // 每月单价，币种见 Currency
+	PriceMonthly float64 // 每月单价，币种见 Currency；含义随 Billing 而定，见其注释
+	// PriceHourly 是按量节点（BillingHourly）每小时的单价，币种同 Currency；
+	// 包年包月节点与问不到价的节点为 0。
+	PriceHourly float64
+	// Billing 是计费方式（BillingHourly / BillingMonthly）；空表示提供商没有报。
+	Billing string
 	// Currency 是 PriceMonthly 的币种（ISO 4217，如 USD / CNY）；空视为 USD。
 	// 管理台按币种分别合计，不同币种不能相加。
 	Currency    string //
@@ -41,6 +56,8 @@ type Server struct {
 	CreatedAt   time.Time
 	// ExpiresAt 是包年包月节点的到期时间（按量节点为零值，不出现在 JSON 里）。
 	ExpiresAt time.Time
+	// AutoRenew 是包年包月节点有没有开自动续费；nil 表示提供商没有报。
+	AutoRenew *bool
 	// Lat/Lng 是节点所在地理坐标（等距投影用）。提供商 API 通常不直接返回，
 	// 由各实现在 toServer 里按 region slug 从静态映射表填写；未知 slug 为 0。
 	Lat float64

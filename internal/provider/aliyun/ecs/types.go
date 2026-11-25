@@ -29,6 +29,7 @@ type instance struct {
 	Cpu                int    `json:"Cpu"`
 	Memory             int    `json:"Memory"` // MB
 	CreationTime       string `json:"CreationTime"`
+	ExpiredTime        string `json:"ExpiredTime"` // 包年包月实例的到期时间；按量实例为空
 	ImageId            string `json:"ImageId"`
 	PublicIpAddress    struct {
 		IpAddress []string `json:"IpAddress"`
@@ -110,7 +111,8 @@ type keyPair struct {
 	KeyPairFingerPrint string `json:"KeyPairFingerPrint"`
 }
 
-// priceInfo 是 DescribePrice 的结果；按量付费时 TradePrice 是每小时合计。
+// priceInfo 是 DescribePrice / DescribeRenewalPrice 的结果：前者的 TradePrice 在按量付费时是
+// 每小时合计，后者（只给必填参数时）是续一个月的价格。
 type priceInfo struct {
 	PriceInfo struct {
 		Price struct {
@@ -118,4 +120,14 @@ type priceInfo struct {
 			Currency   string  `json:"Currency"`
 		} `json:"Price"`
 	} `json:"PriceInfo"`
+}
+
+// autoRenewPage 是 DescribeInstanceAutoRenewAttribute 的结果：一组包年包月实例的自动续费属性。
+type autoRenewPage struct {
+	InstanceRenewAttributes struct {
+		InstanceRenewAttribute []struct {
+			InstanceId       string `json:"InstanceId"`
+			AutoRenewEnabled bool   `json:"AutoRenewEnabled"`
+		} `json:"InstanceRenewAttribute"`
+	} `json:"InstanceRenewAttributes"`
 }

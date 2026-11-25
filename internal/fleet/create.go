@@ -206,8 +206,11 @@ type ServerJSON struct {
 	MemoryMB     int       `json:"memory_mb"`
 	DiskGB       int       `json:"disk_gb"`
 	PriceMonthly float64   `json:"price_monthly"`
-	ExpiresAt    time.Time `json:"expires_at,omitzero"` // 包年包月节点的到期时间；按量节点不带
-	Currency     string    `json:"currency,omitempty"`  // price_monthly 的币种；空 = USD，不同币种不可相加
+	PriceHourly  float64   `json:"price_hourly,omitempty"` // 按量节点每小时的单价；包年包月 / 问不到价的不带
+	Billing      string    `json:"billing,omitempty"`      // hourly 按量 / monthly 包年包月；不带 = 提供商没报
+	ExpiresAt    time.Time `json:"expires_at,omitzero"`    // 包年包月节点的到期时间；按量节点不带
+	AutoRenew    *bool     `json:"auto_renew,omitempty"`   // 包年包月节点是否自动续费；不带 = 未知
+	Currency     string    `json:"currency,omitempty"`     // price_monthly 的币种；空 = USD，不同币种不可相加
 	IPv4Public   string    `json:"ipv4_public,omitempty"`
 	IPv4Private  string    `json:"ipv4_private,omitempty"`
 	SSHPort      int       `json:"ssh_port,omitempty"` // 建机注入的 sshd 端口（缺省 0 = 未指定/22）
@@ -368,15 +371,19 @@ func waitForActive(ctx context.Context, p provider.Provider, id string, timeout,
 	}
 }
 
-// ToServerJSON 把提供商统一视图转为结果 JSON 形态（create 结果与 list 子命令共用）。
+// ToServerJSON 把提供商统一视图转为结果 JSON 形态（create 结果、list 子命令与管理台的
+// 节点清单共用——管理台不要再抄一份，上次抄的那份漏了到期时间）。
 func ToServerJSON(s provider.Server) ServerJSON {
 	return ServerJSON{
 		Account: s.Account, ID: s.ID, Name: s.Name, Status: s.Status,
 		Region: s.Region, Size: s.Size, Image: s.Image,
 		VCPUs: s.VCPUs, MemoryMB: s.MemoryMB, DiskGB: s.DiskGB,
 		PriceMonthly: s.PriceMonthly,
+		PriceHourly:  s.PriceHourly,
+		Billing:      s.Billing,
 		Currency:     s.Currency,
 		ExpiresAt:    s.ExpiresAt,
+		AutoRenew:    s.AutoRenew,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
 		Lat: s.Lat, Lng: s.Lng,

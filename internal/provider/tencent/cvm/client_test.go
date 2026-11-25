@@ -244,13 +244,16 @@ func TestListAcrossRegions(t *testing.T) {
 	f.add(fakeInstance{id: "ins-b", region: "ap-beijing", zone: "ap-beijing-8", name: "b", instanceType: "SA5.MEDIUM2",
 		state: "STOPPED", imageID: "img-plain"})
 	f.add(fakeInstance{id: "ins-c", region: "ap-shanghai", name: "c", instanceType: "S5.MEDIUM2", state: "PENDING", imageID: "img-plain"})
+	// 包年包月实例：与 ins-a 同规格、同可用区，但不能借用它的按量询价
+	f.add(fakeInstance{id: "ins-d", region: "ap-beijing", zone: "ap-beijing-8", name: "d", instanceType: "SA5.MEDIUM2",
+		state: "RUNNING", imageID: "img-plain", charge: "PREPAID"})
 
 	got, err := c.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("共 %d 台, want 3: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("共 %d 台, want 4: %+v", len(got), got)
 	}
 	byID := map[string]provider.Server{}
 	for _, s := range got {
@@ -264,6 +267,14 @@ func TestListAcrossRegions(t *testing.T) {
 	// 询价 0.2 元/小时 → 月费 146，币种 CNY；镜像标注成 slug；坐标取自地域表
 	if a.PriceMonthly != 146 || a.Currency != "CNY" || a.Image != "ubuntu-24.04" || a.Lat != 39.90 || a.Lng != 116.41 {
 		t.Errorf("月费/币种/镜像/坐标不符: %+v", a)
+	}
+	// 按量节点另外带出真实计费单位：每小时单价
+	if a.Billing != provider.BillingHourly || a.PriceHourly != 0.2 {
+		t.Errorf("计费方式 / 小时价不符: billing=%q hourly=%v", a.Billing, a.PriceHourly)
+	}
+	// 包年包月的 CVM 本工具不询价（续费价没在真机上验过）：既不标计费方式也不带价
+	if d := byID["ins-d"]; d.Billing != "" || d.PriceMonthly != 0 || d.PriceHourly != 0 {
+		t.Errorf("包年包月实例不应带按量的价: %+v", d)
 	}
 	if !slices.Equal(a.Tags, []string{"batch:x", "bare"}) {
 		t.Errorf("标签 = %v", a.Tags)

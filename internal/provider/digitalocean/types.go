@@ -22,6 +22,7 @@ type size struct {
 	VCPUs        int     `json:"vcpus"`
 	Disk         int     `json:"disk"` // GB
 	PriceMonthly float64 `json:"price_monthly"`
+	PriceHourly  float64 `json:"price_hourly"` // 官方小时价；不等于月价折算值
 	Available    bool    `json:"available"`
 }
 

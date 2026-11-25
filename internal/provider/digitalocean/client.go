@@ -408,6 +408,7 @@ type geoPoint struct{ lat, lng float64 }
 
 // regionGeo 覆盖全部 DO 区域 slug（含已退役的旧域）。DO API 不返回坐标，
 // 只能静态映射；未知 slug 缺省为 0，前端按"未定位"处理。
+// 新区域上线后要来这里补一行（2026-11 补了 DO 新开的四个美国区域）。
 var regionGeo = map[string]geoPoint{
 	"nyc1": {40.71, -74.01}, "nyc2": {40.71, -74.01}, "nyc3": {40.71, -74.01},
 	"sfo1": {37.77, -122.42}, "sfo2": {37.77, -122.42}, "sfo3": {37.77, -122.42},
@@ -418,6 +419,10 @@ var regionGeo = map[string]geoPoint{
 	"sgp1": {1.35, 103.82},
 	"syd1": {-33.87, 151.21},
 	"tor1": {43.65, -79.38},
+	"atl1": {33.75, -84.39},
+	"ric1": {37.54, -77.44},
+	"mkc1": {39.10, -94.58},
+	"mem1": {35.15, -90.05},
 }
 
 func (c *Client) toServer(d droplet) provider.Server {
@@ -433,6 +438,8 @@ func (c *Client) toServer(d droplet) provider.Server {
 		MemoryMB:     d.Memory,
 		DiskGB:       d.Disk,
 		PriceMonthly: d.Size.PriceMonthly,
+		PriceHourly:  d.Size.PriceHourly,
+		Billing:      provider.BillingHourly, // DO 按小时计费（月封顶）
 		Tags:         d.Tags,
 	}
 	if g, ok := regionGeo[d.Region.Slug]; ok {

@@ -30,6 +30,9 @@ type fakeAPI struct {
 	available     map[string][]string        // 地域 → 在售规格 ID
 	diskOK        map[string]bool            // RunInstances 预检接受的云盘类型
 	failList      map[string]bool            // 这些地域的 DescribeInstances 报错
+	renewPrices   map[string]float64         // 包年包月实例 ID → 续一个月的价格
+	failRenew     bool                       // DescribeRenewalPrice 报错
+	failAutoRenew bool                       // DescribeInstanceAutoRenewAttribute 报错
 	replacePolls  int                        // 换系统盘从下发到结束要经过的查询次数
 	replaceReject bool                       // 换系统盘请求被平台直接拒绝
 	nextID        int
@@ -53,6 +56,7 @@ type fakeInstance struct {
 	Cpu                int
 	Memory             int
 	CreationTime       string
+	ExpiredTime        string // 包年包月实例的到期时间；按量实例为空
 	ImageId            string
 	PublicIpAddress    struct {
 		IpAddress []string `json:"IpAddress"`
@@ -74,6 +78,9 @@ type fakeInstance struct {
 	tags    map[string]string // 标签键 → 值（ListTagResources 用）
 	sysDisk disk
 	locks   int // 未完成的操作锁个数
+	// autoRenew 是包年包月实例有没有开自动续费（DescribeInstanceAutoRenewAttribute 用；
+	// 不进 DescribeInstances 的响应）
+	autoRenew bool
 
 	// pending 是已下发未完成的异步操作：还剩几次查询后落到 final
 	pending *pendingOp
@@ -90,11 +97,14 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		switches: map[string][]vswitch{}, groups: map[string][]securityGroup{}, images: map[string][]image{},
 		keyPairs: map[string][]keyPair{}, types: map[string][]instanceType{}, available: map[string][]string{},
 		diskOK: map[string]bool{"cloud_essd": true}, failList: map[string]bool{}, replacePolls: 1,
+		renewPrices: map[string]float64{},
 	}
 }
 
 func (f *fakeAPI) add(inst fakeInstance) *fakeInstance {
-	inst.InstanceChargeType = postpaid
+	if inst.InstanceChargeType == "" {
+		inst.InstanceChargeType = postpaid // 缺省按量；要造包年包月实例就显式给 PrePaid
+	}
 	inst.sysDisk = disk{DiskId: "disk-" + inst.InstanceId, Type: "system", Category: "cloud_essd", Size: 40}
 	f.instances[inst.InstanceId] = &inst
 	return &inst
@@ -373,6 +383,43 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.ok(w, map[string]any{"TagResources": map[string]any{"TagResource": list}})
 	case "DescribePrice":
 		f.ok(w, map[string]any{"PriceInfo": map[string]any{"Price": map[string]any{"TradePrice": 0.42, "Currency": "CNY"}}})
+	case "DescribeRenewalPrice":
+		// 只给必填参数 = 续费 1 个月的价格；只认包年包月实例
+		inst := f.instances[params["ResourceId"]]
+		if f.failRenew || inst == nil || inst.InstanceChargeType != prepaid {
+			f.fail(w, "InvalidResourceId.NotFound", "not found or not prepaid")
+			return
+		}
+		price, ok := f.renewPrices[inst.InstanceId]
+		if !ok {
+			price = 100
+		}
+		f.ok(w, map[string]any{"PriceInfo": map[string]any{"Price": map[string]any{
+			"OriginalPrice": price, "DiscountPrice": 0, "Currency": "CNY", "TradePrice": price,
+		}}})
+	case "DescribeInstanceAutoRenewAttribute":
+		// 照平台的真实行为：InstanceId 与 RenewalStatus 至少给一个，都不给就拒绝
+		// （接口元数据把 InstanceId 标成非必填，实际不是——2026-11 在真实账号上踩到）
+		if f.failAutoRenew {
+			f.fail(w, "InternalError", "boom")
+			return
+		}
+		if params["InstanceId"] == "" && params["RenewalStatus"] == "" {
+			f.fail(w, "InvalidParameter.RenewalStatusInstanceId",
+				"The parameter RenewalStatus and InstanceId can not be both empty.")
+			return
+		}
+		set := []map[string]any{}
+		if inst := f.instances[params["InstanceId"]]; inst != nil && inst.InstanceChargeType == prepaid {
+			status := "Normal"
+			if inst.autoRenew {
+				status = "AutoRenewal"
+			}
+			set = append(set, map[string]any{"InstanceId": inst.InstanceId, "AutoRenewEnabled": inst.autoRenew,
+				"RenewalStatus": status, "Duration": 1, "PeriodUnit": "Month"})
+		}
+		f.ok(w, map[string]any{"PageNumber": 1, "PageSize": 100, "TotalCount": len(set),
+			"InstanceRenewAttributes": map[string]any{"InstanceRenewAttribute": set}})
 	default:
 		f.t.Errorf("fakeAPI: 未模拟的接口 %s", action)
 		f.fail(w, "InvalidAction.NotFound", "not mocked: "+action)

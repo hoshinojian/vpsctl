@@ -464,6 +464,9 @@ func (c *Client) toServer(region string, inst instance, b bundle) provider.Serve
 		CreatedAt:   parseTime(inst.CreatedTime),
 		ExpiresAt:   parseTime(inst.ExpiredTime),
 		Image:       tencent.ImageSlug(inst.Platform, inst.OsName),
+		// 轻量只有包年包月一种买法：月价就是续一个月的价（套餐目录价），没有小时价
+		Billing:   provider.BillingMonthly,
+		AutoRenew: autoRenewOf(inst.RenewFlag),
 	}
 	if price := b.Price.InstancePrice.DiscountPrice; price > 0 {
 		s.PriceMonthly = price
@@ -474,6 +477,21 @@ func (c *Client) toServer(region string, inst instance, b bundle) provider.Serve
 		s.Lat, s.Lng = lat, lng
 	}
 	return s
+}
+
+// autoRenewOf 把实例的续费标识翻成"是否开了自动续费"。平台给的标识有四个取值，看后缀
+// 就能分：以 AUTO_RENEW 结尾的是开了，以 MANUAL_RENEW 结尾的是没开；空值（接口没给）
+// 返回 nil 表示未知。
+func autoRenewOf(flag string) *bool {
+	var on bool
+	switch {
+	case strings.HasSuffix(flag, "AUTO_RENEW"):
+		on = true
+	case strings.HasSuffix(flag, "MANUAL_RENEW"):
+	default:
+		return nil
+	}
+	return &on
 }
 
 func first(ss []string) string {

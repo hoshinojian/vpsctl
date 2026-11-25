@@ -72,7 +72,9 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 }
 
 func (f *fakeAPI) add(inst fakeInstance) *fakeInstance {
-	inst.charge = postpaid
+	if inst.charge == "" {
+		inst.charge = postpaid // 缺省按量；要造包年包月实例就显式给 charge
+	}
 	f.instances[inst.id] = &inst
 	return &inst
 }
