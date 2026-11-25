@@ -304,6 +304,53 @@ func TestListAcrossRegions(t *testing.T) {
 	}
 }
 
+// 管理台建完机器后每几秒刷一次列表。创建中的实例平台还给不出价——这次失败不能缓存：
+// 否则机器都跑起来了，价格列还要再显示一小时"询不到价"（2026-11-25 管理台建机实测）。
+// 运行中 / 已关机的实例问不到价照旧缓存，免得每次列表都去问一个问不出价的机型。
+func TestPriceFailureNotCachedWhileCreating(t *testing.T) {
+	f, c := seeded(t)
+	inst := f.add(fakeInstance{id: "ins-new", region: "ap-beijing", zone: "ap-beijing-8",
+		instanceType: "SA9.MEDIUM2", state: "PENDING", imageID: "img-plain"})
+	f.priceFail = true
+	priceOf := func(id string) float64 {
+		got, err := c.List(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range got {
+			if s.ID == id {
+				return s.PriceMonthly
+			}
+		}
+		t.Fatalf("没列出 %s", id)
+		return -1
+	}
+	if p := priceOf("ins-new"); p != 0 {
+		t.Fatalf("创建中的实例问不到价，不该有价, got %v", p)
+	}
+
+	// 机器跑起来、平台能给价了：下一次列表就该有价
+	f.priceFail = false
+	inst.state = "RUNNING"
+	if p := priceOf("ins-new"); p != 146 {
+		t.Errorf("实例到稳定态后应重新询到价, got %v（创建中那次失败不该被缓存）", p)
+	}
+
+	// 稳定态问不到价：照旧缓存，再列一次不重打
+	f.add(fakeInstance{id: "ins-running", region: "ap-beijing", zone: "ap-beijing-8",
+		instanceType: "S5.MEDIUM4", state: "RUNNING", imageID: "img-plain"})
+	f.priceFail = true
+	f.reset()
+	if p := priceOf("ins-running"); p != 0 {
+		t.Fatalf("问不到价时不应有价, got %v", p)
+	}
+	first := countAction(f, "InquiryPriceRunInstances")
+	priceOf("ins-running")
+	if n := countAction(f, "InquiryPriceRunInstances"); n != first {
+		t.Errorf("稳定态问不到价应缓存（两次列表的询价次数应相同）: %d → %d", first, n)
+	}
+}
+
 func TestListRegionFailureFailsWholeList(t *testing.T) {
 	f, c := seeded(t)
 	f.add(runningInstance("ins-a", "ap-beijing"))

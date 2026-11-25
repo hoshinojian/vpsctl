@@ -377,6 +377,10 @@ func (c *Client) resolveSSHKeys(ctx context.Context, region string, in []string)
 // hourlyPrice 返回实例的按量小时单价（折后价优先），结果带缓存。询价接口必须
 // 给全镜像、可用区、系统盘才能出价，所以入参是实例本身；问不到时缓存 0 并
 // 返回 false——月费展示不出来不应拖垮列表。
+//
+// 例外：实例不在稳定态（还在创建、开关机、重装）时，问不到价不缓存。管理台建完
+// 机器后每几秒刷一次列表，创建中那次失败要是缓存了，机器都跑起来了价格列还要
+// 再显示一小时"询不到价"（2026-11-25 管理台建机实测）。
 func (c *Client) hourlyPrice(ctx context.Context, region string, inst instance) (float64, bool) {
 	key := region + "|" + inst.Placement.Zone + "|" + inst.InstanceType
 	if p, ok := c.prices.Get(key); ok {
@@ -402,8 +406,16 @@ func (c *Client) hourlyPrice(ctx context.Context, region string, inst instance) 
 			hourly = out.Price.InstancePrice.UnitPrice
 		}
 	}
+	if hourly <= 0 && !priceSettled(inst) {
+		return 0, false
+	}
 	c.prices.Put(key, hourly)
 	return hourly, hourly > 0
+}
+
+// priceSettled 表示实例不处在任何操作的中间态——只有运行中和已关机两种。
+func priceSettled(inst instance) bool {
+	return inst.InstanceState == "RUNNING" || inst.InstanceState == "STOPPED"
 }
 
 // warmPrices 并发预热一批实例的询价缓存，让随后的 toServer 只读缓存不再串行打接口。
