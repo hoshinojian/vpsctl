@@ -108,6 +108,52 @@ func TestListMapsInstances(t *testing.T) {
 	}
 }
 
+// 轻量全是包年包月：节点要标成包年包月（不带小时价），并把实例的续费标识翻成
+// "是否自动续费"——开了自动续费的到期日无所谓，没开的才要提醒人。
+func TestListBillingAndAutoRenew(t *testing.T) {
+	f, c := seeded(t)
+	base := fakeInstance{region: "ap-guangzhou", state: "RUNNING", bundle: "bundle_small", platform: "UBUNTU",
+		osName: "Ubuntu Server 24.04 LTS 64bit", expired: "2026-12-24T12:00:00Z"}
+	for id, flag := range map[string]string{
+		"lh-auto":    "NOTIFY_AND_AUTO_RENEW",
+		"lh-manual":  "NOTIFY_AND_MANUAL_RENEW",
+		"lh-quiet":   "DISABLE_NOTIFY_AND_AUTO_RENEW",
+		"lh-unknown": "",
+	} {
+		inst := base
+		inst.id, inst.name, inst.renew = id, id, flag
+		f.add(inst)
+	}
+	got, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]provider.Server{}
+	for _, s := range got {
+		byID[s.ID] = s
+	}
+	want := map[string]*bool{
+		"lh-auto":    ptr(true),
+		"lh-manual":  ptr(false),
+		"lh-quiet":   ptr(true),
+		"lh-unknown": nil,
+	}
+	for id, w := range want {
+		s := byID[id]
+		if s.Billing != provider.BillingMonthly || s.PriceHourly != 0 || s.PriceMonthly != 35 {
+			t.Errorf("%s 应标成包年包月、只有月价: %+v", id, s)
+		}
+		switch {
+		case w == nil && s.AutoRenew != nil:
+			t.Errorf("%s 没报续费标识，应为未知, got %v", id, *s.AutoRenew)
+		case w != nil && (s.AutoRenew == nil || *s.AutoRenew != *w):
+			t.Errorf("%s 自动续费 = %v, want %v", id, s.AutoRenew, *w)
+		}
+	}
+}
+
+func ptr(b bool) *bool { return &b }
+
 func TestListRegionFailureFailsWholeList(t *testing.T) {
 	f, c := seeded(t)
 	f.failList["ap-beijing"] = true

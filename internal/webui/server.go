@@ -905,17 +905,9 @@ func (s *Server) handleOperations(w http.ResponseWriter, _ *http.Request) {
 
 // ---- 工具 ----
 
+// toServerJSON 与 list 子命令、create 结果共用同一份转换，免得两边各抄一份又抄漏字段。
 func toServerJSON(s provider.Server) fleet.ServerJSON {
-	return fleet.ServerJSON{
-		Account: s.Account, ID: s.ID, Name: s.Name, Status: s.Status,
-		Region: s.Region, Size: s.Size, Image: s.Image,
-		VCPUs: s.VCPUs, MemoryMB: s.MemoryMB, DiskGB: s.DiskGB,
-		PriceMonthly: s.PriceMonthly,
-		Currency:     s.Currency,
-		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
-		Tags: s.Tags, CreatedAt: s.CreatedAt,
-		Lat: s.Lat, Lng: s.Lng,
-	}
+	return fleet.ToServerJSON(s)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

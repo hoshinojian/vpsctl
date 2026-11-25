@@ -213,6 +213,54 @@ func TestDropletsAggregation(t *testing.T) {
 	}
 }
 
+// 节点清单要把计费方式 / 小时价 / 到期时间 / 自动续费原样带给前端：管理台曾经自己抄了一份
+// 转换函数，漏了到期时间，详情里的"到期时间"一直是空的。
+func TestDropletsCarryBillingAndExpiry(t *testing.T) {
+	exp := time.Date(2026, 12, 10, 16, 0, 0, 0, time.UTC)
+	no := false
+	srv := testServer(t, map[string]*fakeProvider{
+		"a1": {servers: []provider.Server{
+			{ID: "1", Account: "a1", Name: "prepaid", Status: "active", Billing: provider.BillingMonthly,
+				PriceMonthly: 1263.64, Currency: "CNY", ExpiresAt: exp, AutoRenew: &no},
+			{ID: "2", Account: "a1", Name: "ondemand", Status: "active", Billing: provider.BillingHourly,
+				PriceMonthly: 1511.1, PriceHourly: 2.07, Currency: "CNY"},
+		}},
+	})
+	resp, err := http.Get(srv.URL + "/api/droplets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got listResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Droplets) != 2 {
+		t.Fatalf("droplets = %+v", got.Droplets)
+	}
+	var prepaid, ondemand *uiDroplet
+	for i := range got.Droplets {
+		switch got.Droplets[i].ID {
+		case "1":
+			prepaid = &got.Droplets[i]
+		case "2":
+			ondemand = &got.Droplets[i]
+		}
+	}
+	if prepaid == nil || ondemand == nil {
+		t.Fatalf("droplets = %+v", got.Droplets)
+	}
+	if prepaid.Billing != "monthly" || !prepaid.ExpiresAt.Equal(exp) || prepaid.AutoRenew == nil || *prepaid.AutoRenew {
+		t.Errorf("包年包月节点的计费 / 到期 / 自动续费没带出来: %+v", prepaid.ServerJSON)
+	}
+	if prepaid.PriceHourly != 0 {
+		t.Errorf("包年包月节点不该带小时价: %+v", prepaid.ServerJSON)
+	}
+	if ondemand.Billing != "hourly" || ondemand.PriceHourly != 2.07 || !ondemand.ExpiresAt.IsZero() || ondemand.AutoRenew != nil {
+		t.Errorf("按量节点的计费 / 小时价没带出来，或带了不该带的到期 / 自动续费: %+v", ondemand.ServerJSON)
+	}
+}
+
 func TestIndexServed(t *testing.T) {
 	srv := testServer(t, map[string]*fakeProvider{"a1": {servers: []provider.Server{}}})
 	resp, err := http.Get(srv.URL + "/")

@@ -344,10 +344,13 @@ func (c *Client) toServer(region string, inst instance) provider.Server {
 	if lat, lng, ok := tencent.RegionGeo(region); ok {
 		s.Lat, s.Lng = lat, lng
 	}
-	// 只有按量实例能问到小时单价；包年包月实例的月费这里算不出来，留空
-	if inst.InstanceChargeType == postpaid && inst.InstanceType != "" {
-		if hourly, ok := c.prices.Get(region + "|" + inst.Placement.Zone + "|" + inst.InstanceType); ok && hourly > 0 {
-			s.PriceMonthly = hourly * provider.HoursPerMonth
+	// 只有按量实例能问到小时单价；包年包月实例的续费价本工具不询价，计费方式与价格都留空
+	if inst.InstanceChargeType == postpaid {
+		s.Billing = provider.BillingHourly
+		if inst.InstanceType != "" {
+			if hourly, ok := c.prices.Get(region + "|" + inst.Placement.Zone + "|" + inst.InstanceType); ok && hourly > 0 {
+				s.PriceHourly, s.PriceMonthly = hourly, hourly*provider.HoursPerMonth
+			}
 		}
 	}
 	return s

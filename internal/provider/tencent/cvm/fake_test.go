@@ -33,6 +33,7 @@ type fakeAPI struct {
 	busyStarts     int             // 接下来这么多次开机请求会被"操作进行中"拒绝
 	resetAutoStart bool            // 重装完成后平台自动把实例开起来
 	alwaysRunning  bool            // 开机请求一律被平台以"已在运行"拒绝
+	priceFail      bool            // 询价接口报错（模拟实例还在创建中、平台给不出价）
 	nextID         int
 	calls          []fakeCall // 按顺序记录每次调用，断言用
 }
@@ -72,7 +73,9 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 }
 
 func (f *fakeAPI) add(inst fakeInstance) *fakeInstance {
-	inst.charge = postpaid
+	if inst.charge == "" {
+		inst.charge = postpaid // 缺省按量；要造包年包月实例就显式给 charge
+	}
 	f.instances[inst.id] = &inst
 	return &inst
 }
@@ -288,6 +291,10 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.write(w, map[string]any{"SubnetSet": set})
 	case "InquiryPriceRunInstances":
+		if f.priceFail {
+			f.fail(w, "InternalError", "price not ready")
+			return
+		}
 		f.write(w, map[string]any{"Price": map[string]any{"InstancePrice": map[string]any{"UnitPrice": 0.26, "UnitPriceDiscount": 0.2}}})
 	default:
 		f.t.Errorf("fakeAPI: 未模拟的接口 %s", action)

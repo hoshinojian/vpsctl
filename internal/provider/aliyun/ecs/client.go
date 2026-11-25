@@ -22,7 +22,8 @@ const (
 	version     = "2014-05-26"
 	centralHost = "ecs.aliyuncs.com" // 仅全局接口（DescribeRegions）；其余走 ecsHost
 	currency    = "CNY"
-	postpaid    = "PostPaid"
+	postpaid    = "PostPaid" // InstanceChargeType：按量付费（按小时扣）
+	prepaid     = "PrePaid"  // InstanceChargeType：包年包月
 
 	pageSize = 100
 	maxPages = 1000 // 分页安全上限，防 TotalCount 异常时死循环
@@ -64,6 +65,9 @@ type Client struct {
 	slugs  *provider.TTLCache[string]         // region|ImageId → slug（列表标注镜像用）
 	disks  *provider.TTLCache[disk]           // region|InstanceId → 系统盘
 	prices *provider.TTLCache[float64]        // region|可用区|规格|盘类型|盘大小 → 每小时合计价
+	// renewPrices 是包年包月实例续一个月的价格（region|InstanceId → 月价）。按实例记而
+	// 不是按规格记：折扣可能因购买批次而不同，同规格的实例续费价未必一样。
+	renewPrices *provider.TTLCache[float64]
 
 	// sleep / pollEvery / opWait 供重装链路（关机 → 换盘 → 开机）等待与测试注入
 	sleep     func(ctx context.Context, d time.Duration) error
@@ -74,14 +78,15 @@ type Client struct {
 // New 创建客户端；hc 为 nil 时用带超时的默认客户端。
 func New(account, accessKeyID, accessKeySecret string, hc *http.Client) *Client {
 	return &Client{
-		account: account,
-		api:     aliyun.New(accessKeyID, accessKeySecret, hc),
-		images:  provider.NewTTLCache[[]image](catalogTTL),
-		types:   provider.NewTTLCache[[]instanceType](catalogTTL),
-		avail:   provider.NewTTLCache[[]string](catalogTTL),
-		slugs:   provider.NewTTLCache[string](catalogTTL),
-		disks:   provider.NewTTLCache[disk](catalogTTL),
-		prices:  provider.NewTTLCache[float64](catalogTTL),
+		account:     account,
+		api:         aliyun.New(accessKeyID, accessKeySecret, hc),
+		images:      provider.NewTTLCache[[]image](catalogTTL),
+		types:       provider.NewTTLCache[[]instanceType](catalogTTL),
+		avail:       provider.NewTTLCache[[]string](catalogTTL),
+		slugs:       provider.NewTTLCache[string](catalogTTL),
+		disks:       provider.NewTTLCache[disk](catalogTTL),
+		prices:      provider.NewTTLCache[float64](catalogTTL),
+		renewPrices: provider.NewTTLCache[float64](catalogTTL),
 		sleep: func(ctx context.Context, d time.Duration) error {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -415,9 +420,29 @@ func (c *Client) servers(ctx context.Context, region string, insts []instance) [
 	}
 	forEachBounded(len(priced), func(k int) { c.warmPrice(ctx, region, insts[priced[k]], disks[priced[k]]) })
 
+	// 包年包月实例：续费价逐台问（进缓存）；自动续费状态也逐台问且不缓存（它随时可能
+	// 被人在控制台改掉）——平台要求带实例 ID，"查整个地域"的写法会被拒
+	var prepaidIdx, renewing []int
+	for i, inst := range insts {
+		if inst.InstanceChargeType != prepaid {
+			continue
+		}
+		prepaidIdx = append(prepaidIdx, i)
+		if _, ok := c.renewPrices.Get(renewPriceKey(region, inst.InstanceId)); !ok {
+			renewing = append(renewing, i)
+		}
+	}
+	forEachBounded(len(renewing), func(k int) { c.warmRenewPrice(ctx, region, insts[renewing[k]].InstanceId) })
+	// 各协程只写自己那一格，不共享
+	renews := make([]renewState, len(insts))
+	forEachBounded(len(prepaidIdx), func(k int) {
+		i := prepaidIdx[k]
+		renews[i] = c.autoRenewOf(ctx, region, insts[i].InstanceId)
+	})
+
 	out := make([]provider.Server, len(insts))
 	for i, inst := range insts {
-		out[i] = c.toServer(region, inst, tags[inst.InstanceId], disks[i])
+		out[i] = c.toServer(region, inst, tags[inst.InstanceId], disks[i], renews[i])
 	}
 	return out
 }
@@ -438,8 +463,9 @@ func forEachBounded(n int, fn func(i int)) {
 	wg.Wait()
 }
 
-// toServer 把实例映射成统一视图。月费只读询价缓存（servers 已预先填好）。
-func (c *Client) toServer(region string, inst instance, tags []string, sysDisk disk) provider.Server {
+// toServer 把实例映射成统一视图。价格只读缓存（由 servers 预先填好）；
+// renew 是这台实例的自动续费状态（没问到时 known=false）。
+func (c *Client) toServer(region string, inst instance, tags []string, sysDisk disk, renew renewState) provider.Server {
 	s := provider.Server{
 		ID:          inst.InstanceId,
 		Account:     c.account,
@@ -463,14 +489,73 @@ func (c *Client) toServer(region string, inst instance, tags []string, sysDisk d
 	if g, ok := regionGeo[region]; ok {
 		s.Lat, s.Lng = g.lat, g.lng
 	}
-	// 只有按量实例有小时单价；包年包月实例的月费这里算不出来，留空——同规格的按量
-	// 实例即使缓存里有价也不能借用
+	// 按量：有小时单价，月费是它的估算值（×730）；同规格的包年包月实例即使缓存里有按量
+	// 价也不能借用
 	if inst.InstanceChargeType == postpaid {
+		s.Billing = provider.BillingHourly
 		if hourly, ok := c.prices.Get(priceKey(region, inst, sysDisk)); ok && hourly > 0 {
-			s.PriceMonthly = hourly * provider.HoursPerMonth
+			s.PriceHourly, s.PriceMonthly = hourly, hourly*provider.HoursPerMonth
+		}
+		return s
+	}
+	// 包年包月：没有小时价；月价是"续一个月要多少钱"，到期时间来自实例列表本身
+	if inst.InstanceChargeType == prepaid {
+		s.Billing = provider.BillingMonthly
+		s.ExpiresAt = parseTime(inst.ExpiredTime)
+		if monthly, ok := c.renewPrices.Get(renewPriceKey(region, inst.InstanceId)); ok && monthly > 0 {
+			s.PriceMonthly = monthly
+		}
+		if renew.known {
+			s.AutoRenew = &renew.on
 		}
 	}
 	return s
+}
+
+// renewPriceKey 是续费价缓存的键：按实例记，同一台实例续一个月的价。
+func renewPriceKey(region, id string) string { return region + "|" + id }
+
+// warmRenewPrice 为包年包月实例填好续费价缓存（已有则不打接口）。只给必填参数，
+// 平台默认返回续费 1 个月的价格；这是"保持这台机器继续运行每月要付多少钱"，不是
+// 当初的实付（实付要走账单接口，本工具的账号没有那个权限）。问不到也缓存 0。
+func (c *Client) warmRenewPrice(ctx context.Context, region, id string) {
+	key := renewPriceKey(region, id)
+	if _, ok := c.renewPrices.Get(key); ok {
+		return
+	}
+	var out priceInfo
+	monthly := 0.0
+	err := c.call(ctx, region, "DescribeRenewalPrice", map[string]string{
+		"RegionId": region, "ResourceId": id,
+	}, &out)
+	if err == nil {
+		monthly = out.PriceInfo.Price.TradePrice
+	}
+	c.renewPrices.Put(key, monthly)
+}
+
+// renewState 是一台实例的自动续费状态；known=false 表示没问到（或不是包年包月实例）。
+type renewState struct{ known, on bool }
+
+// autoRenewOf 问一台包年包月实例有没有开自动续费；known=false 表示没问到。不缓存。
+// 直接返回 renewState 而不是两个布尔值：两个同类型的返回值太容易接反。
+//
+// 必须带 InstanceId：接口元数据把它标成"非必填"，但平台实际要求 InstanceId 与
+// RenewalStatus 至少给一个，不带 InstanceId 会被拒（InvalidParameter.RenewalStatusInstanceId，
+// 2026-11 在真实账号上踩到）。
+func (c *Client) autoRenewOf(ctx context.Context, region, id string) renewState {
+	var res autoRenewPage
+	if err := c.call(ctx, region, "DescribeInstanceAutoRenewAttribute", map[string]string{
+		"RegionId": region, "InstanceId": id,
+	}, &res); err != nil {
+		return renewState{}
+	}
+	for _, a := range res.InstanceRenewAttributes.InstanceRenewAttribute {
+		if a.InstanceId == id {
+			return renewState{known: true, on: a.AutoRenewEnabled}
+		}
+	}
+	return renewState{}
 }
 
 // tagsOf 取一批实例的标签并还原成 vpsctl 的"key:value"扁平串。

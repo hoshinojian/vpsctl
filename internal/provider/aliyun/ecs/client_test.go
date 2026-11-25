@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/provider"
 )
@@ -206,7 +207,10 @@ func TestListEnrichesInstances(t *testing.T) {
 	a := f.add(runningInstance("i-a", "cn-qingdao", "cn-qingdao-b"))
 	a.tags = map[string]string{"batch": "x", "bare": ""}
 	b := f.add(runningInstance("i-b", "cn-qingdao", "cn-qingdao-b"))
-	b.InstanceChargeType = "PrePaid" // 包年包月：不询价
+	b.InstanceChargeType = prepaid // 包年包月：不问按量价，改问续费价
+	b.ExpiredTime = "2026-12-10T16:00Z"
+	b.autoRenew = false
+	f.renewPrices["i-b"] = 1263.64
 	c2 := f.add(runningInstance("i-c", "us-east-1", "us-east-1a"))
 	c2.PublicIpAddress.IpAddress = nil
 	c2.Status = "Stopped"
@@ -238,8 +242,17 @@ func TestListEnrichesInstances(t *testing.T) {
 	if !slices.Equal(sa.Tags, []string{"bare", "batch:x"}) { // 排过序，保证两次列表输出一致
 		t.Errorf("标签应还原成 key:value（空值的只留键）: %v", sa.Tags)
 	}
-	if sb := byID["i-b"]; sb.PriceMonthly != 0 {
-		t.Errorf("包年包月实例算不出月费，应为 0: %+v", sb)
+	// 按量节点另外带出真实计费单位：每小时单价；没有到期时间、没有自动续费这一说
+	if sa.Billing != provider.BillingHourly || !near(sa.PriceHourly, 0.42) ||
+		!sa.ExpiresAt.IsZero() || sa.AutoRenew != nil {
+		t.Errorf("按量实例的计费方式 / 小时价 / 到期 / 自动续费不符: %+v", sa)
+	}
+	// 包年包月：月价是"续一个月要多少钱"，带到期时间与自动续费状态，不带小时价
+	exp := time.Date(2026, 12, 10, 16, 0, 0, 0, time.UTC)
+	sb := byID["i-b"]
+	if sb.Billing != provider.BillingMonthly || !near(sb.PriceMonthly, 1263.64) || sb.PriceHourly != 0 ||
+		!sb.ExpiresAt.Equal(exp) || sb.AutoRenew == nil || *sb.AutoRenew {
+		t.Errorf("包年包月实例的计费 / 续费价 / 到期 / 自动续费不符: %+v", sb)
 	}
 	if sc := byID["i-c"]; sc.Status != "off" || sc.IPv4Public != "" || sc.Lat != 38.91 {
 		t.Errorf("已关机实例映射不符: %+v", sc)
@@ -250,6 +263,21 @@ func TestListEnrichesInstances(t *testing.T) {
 	// 询价：按量实例按"可用区|规格|盘"去重后各问一次（青岛、美国各一档），包年包月的不问
 	if n := countAction(f, "DescribePrice"); n != 2 {
 		t.Errorf("DescribePrice 应调 2 次, got %d", n)
+	}
+	// 续费价与自动续费状态都逐台问（只问包年包月的）
+	if n := countAction(f, "DescribeRenewalPrice"); n != 1 {
+		t.Errorf("DescribeRenewalPrice 应调 1 次, got %d", n)
+	}
+	if p := f.lastParams("DescribeRenewalPrice"); p["RegionId"] != "cn-qingdao" || p["ResourceId"] != "i-b" ||
+		p["Period"] != "" || p["PriceUnit"] != "" {
+		t.Errorf("续费价只给必填参数（= 续 1 个月）: %v", p)
+	}
+	if n := countAction(f, "DescribeInstanceAutoRenewAttribute"); n != 1 {
+		t.Errorf("DescribeInstanceAutoRenewAttribute 应调 1 次, got %d", n)
+	}
+	// 平台要求带实例 ID：不带的话整台实例的自动续费状态就查不出来（上面的断言会红）
+	if p := f.lastParams("DescribeInstanceAutoRenewAttribute"); p["RegionId"] != "cn-qingdao" || p["InstanceId"] != "i-b" {
+		t.Errorf("自动续费状态应按实例查: %v", p)
 	}
 	// 标签按地域分批查，资源 ID 平铺成 ResourceId.N
 	tagged := 0
@@ -266,6 +294,55 @@ func TestListEnrichesInstances(t *testing.T) {
 	}
 	if _, err := c.List(context.Background()); err != nil || countAction(f, "DescribeRegions") != 1 {
 		t.Errorf("地域表应只取 1 次: err=%v calls=%d", err, countAction(f, "DescribeRegions"))
+	}
+	// 续费价进缓存：再列一次不重打（自动续费状态可能被人在控制台改，每次都现查）
+	if n := countAction(f, "DescribeRenewalPrice"); n != 1 {
+		t.Errorf("续费价应缓存, DescribeRenewalPrice 仍应是 1 次, got %d", n)
+	}
+	if n := countAction(f, "DescribeInstanceAutoRenewAttribute"); n != 2 {
+		t.Errorf("自动续费状态不应缓存, DescribeInstanceAutoRenewAttribute 应为 2 次, got %d", n)
+	}
+}
+
+// 续费价或自动续费属性问不到，不该拖垮整张列表：节点照常列出，只是相应的那项留空。
+func TestPrepaidInfoFailuresDoNotBreakList(t *testing.T) {
+	f, c := seeded(t)
+	b := f.add(runningInstance("i-b", "cn-qingdao", "cn-qingdao-b"))
+	b.InstanceChargeType = prepaid
+	b.ExpiredTime = "2026-12-10T16:00Z"
+	f.failRenew, f.failAutoRenew = true, true
+
+	got, err := c.List(context.Background())
+	if err != nil {
+		t.Fatalf("包年包月的补充信息问不到不应让列表失败: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("共 %d 台, want 1: %+v", len(got), got)
+	}
+	s := got[0]
+	if s.Billing != provider.BillingMonthly || s.PriceMonthly != 0 || s.AutoRenew != nil {
+		t.Errorf("问不到时应留空而不是报错或编一个数: %+v", s)
+	}
+	if s.ExpiresAt.IsZero() {
+		t.Errorf("到期时间来自实例列表本身，不该受询价失败影响: %+v", s)
+	}
+	// 问不到也缓存，免得每次列表都重打
+	if _, err := c.List(context.Background()); err != nil || countAction(f, "DescribeRenewalPrice") != 1 {
+		t.Errorf("失败的询价也应缓存: err=%v calls=%d", err, countAction(f, "DescribeRenewalPrice"))
+	}
+}
+
+// 地域里没有包年包月实例时不该去问自动续费属性。
+func TestNoAutoRenewQueryWithoutPrepaid(t *testing.T) {
+	f, c := seeded(t)
+	f.add(runningInstance("i-a", "cn-qingdao", "cn-qingdao-b"))
+	if _, err := c.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range f.actions() {
+		if strings.HasSuffix(a, " DescribeRenewalPrice") || strings.HasSuffix(a, " DescribeInstanceAutoRenewAttribute") {
+			t.Errorf("没有包年包月实例不该调续费相关接口: %s", a)
+		}
 	}
 }
 
