@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -56,9 +57,23 @@ func waitActionCompleted(ctx context.Context, p provider.Provider, ref provider.
 	}
 }
 
+// LoginFor 按"账号 / 实例 ID"取该节点的登录凭据。重装时要重新下发密码的提供商
+// （provider.Rebuilder）靠它拿到凭据。
+//
+// 收函数而不是直接收 nodepass.Store：nodepass 反过来 import fleet（要 fleet.Target 等
+// 类型），fleet 不能依赖 nodepass。
+type LoginFor func(account, id string) (provider.Login, bool)
+
+// errNoLogin 表示该提供商重装必须重新下发密码，但没有可用记录。
+const errNoLogin = "该提供商的节点重装必须重新下发登录密码，但密码库里没有这台节点的记录" +
+	"（--no-password / --user-data 建的节点没有密码可下发）；请销毁后重建"
+
 // RebuildBatch 并发重装多台：单动作，轮询至完成。数据清空不可恢复，
 // 调用方（CLI/UI）负责事前确认。
-func RebuildBatch(ctx context.Context, clients []AccountClient, targets []Target, image string, wait, poll time.Duration) []OpResult {
+//
+// 对实现了 provider.Rebuilder 的提供商（轻量应用服务器），loginFor 给出的凭据会随重装
+// 重新下发；取不到凭据的节点直接拒绝，不发起重装。
+func RebuildBatch(ctx context.Context, clients []AccountClient, targets []Target, image string, wait, poll time.Duration, loginFor LoginFor) []OpResult {
 	byAcct := clientByID(clients)
 	w := ActionWait{Wait: wait, Poll: poll}
 	res := make([]OpResult, len(targets))
@@ -72,7 +87,7 @@ func RebuildBatch(ctx context.Context, clients []AccountClient, targets []Target
 				res[i] = OpResult{Account: t.Account, ID: t.ID, Error: "未知账号"}
 				return
 			}
-			ref, err := p.Rebuild(ctx, t.ID, image)
+			ref, err := rebuildOne(ctx, p, loginFor, t, image)
 			if err != nil {
 				res[i] = OpResult{Account: t.Account, ID: t.ID, Error: "发起重装失败: " + err.Error()}
 				return
@@ -87,6 +102,22 @@ func RebuildBatch(ctx context.Context, clients []AccountClient, targets []Target
 	}
 	wg.Wait()
 	return res
+}
+
+// rebuildOne 选对入口发起一台的重装：需要重新下发凭据的提供商走 RebuildWithLogin。
+func rebuildOne(ctx context.Context, p provider.Provider, loginFor LoginFor, t Target, image string) (provider.ActionRef, error) {
+	rb, ok := p.(provider.Rebuilder)
+	if !ok {
+		return p.Rebuild(ctx, t.ID, image)
+	}
+	var login provider.Login
+	if loginFor != nil {
+		login, _ = loginFor(t.Account, t.ID)
+	}
+	if login.Password == "" {
+		return provider.ActionRef{}, errors.New(errNoLogin)
+	}
+	return rb.RebuildWithLogin(ctx, t.ID, image, login)
 }
 
 // ResizeBatch 并发改配：每台执行 关机（已 off 则跳过）→ resize → 开机，

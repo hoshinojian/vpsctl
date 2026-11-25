@@ -150,6 +150,18 @@ type Prechecker interface {
 	Precheck(ctx context.Context, req CreateRequest) error
 }
 
+// Rebuilder 是可选能力：重装时必须重新下发登录凭据的实现。
+//
+// 没有 cloud-init 用户数据通道、只能靠平台接口设密码的提供商（腾讯云轻量应用服务器）
+// 重装时系统盘整个重建，平台密码不会随之保留：不重新下发的话，节点建得出来却登不进去，
+// 而密码库里仍留着旧密码——导出 NMS 载荷会给出一个机器上根本不存在的凭据。所以这类
+// 提供商必须走 RebuildWithLogin，由编排层先把该节点的凭据查出来传进来。
+//
+// 没有凭据记录（例如 --no-password 建的节点）一律拒绝重装，不能当普通重装放过去。
+type Rebuilder interface {
+	RebuildWithLogin(ctx context.Context, id, image string, login Login) (ActionRef, error)
+}
+
 // Factory 按账号名与凭据构造客户端；hc 为 nil 时用默认 http.Client。
 type Factory func(account string, cred Credentials, hc *http.Client) (Provider, error)
 

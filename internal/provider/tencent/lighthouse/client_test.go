@@ -375,7 +375,7 @@ func TestRebuildRejectedRestoresPower(t *testing.T) {
 	if _, err := c.List(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, err := c.Rebuild(context.Background(), "lhins-a", "ubuntu-22.04")
+	_, err := c.RebuildWithLogin(context.Background(), "lhins-a", "debian-12", provider.Login{Password: "pw-123"})
 	if err == nil || !strings.Contains(err.Error(), "reset rejected") || !strings.Contains(err.Error(), "已发起开机") {
 		t.Fatalf("应带出平台原因与恢复结果, got %v", err)
 	}
@@ -392,7 +392,7 @@ func TestRebuildRejectedRestoresPower(t *testing.T) {
 	f.mu.Lock()
 	f.calls = nil
 	f.mu.Unlock()
-	if _, err := c.Rebuild(context.Background(), "lhins-a", "ubuntu-22.04"); err == nil {
+	if _, err := c.RebuildWithLogin(context.Background(), "lhins-a", "debian-12", provider.Login{Password: "pw-123"}); err == nil {
 		t.Fatal("重装被拒应报错")
 	}
 	if slices.Contains(f.actions(), "ap-guangzhou StartInstances") {
@@ -407,7 +407,7 @@ func TestRebuildPlatformAutoStarts(t *testing.T) {
 	if _, err := c.List(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := c.Rebuild(context.Background(), "lhins-a", "ubuntu-22.04")
+	ref, err := c.RebuildWithLogin(context.Background(), "lhins-a", "debian-12", provider.Login{Password: "pw-123"})
 	if err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -420,6 +420,38 @@ func TestRebuildPlatformAutoStarts(t *testing.T) {
 		t.Errorf("自动开机后重装应已完成, got %q %v", st, err)
 	}
 	_ = inst
+}
+
+// 轻量重装必须重新下发密码，且只能落到默认用户是 root 的镜像上。两条都要在打平台接口
+// 之前就拒绝——否则会留下一个"看着正常、实际登不进去"的节点，而密码库里还留着旧密码。
+func TestRebuildGuards(t *testing.T) {
+	f, c := seeded(t)
+	f.add(runningInstance("lhins-a", "ap-guangzhou"))
+	if _, err := c.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.calls = nil
+	f.mu.Unlock()
+
+	_, err := c.Rebuild(context.Background(), "lhins-a", "debian-12")
+	if err == nil || !strings.Contains(err.Error(), "RebuildWithLogin") {
+		t.Fatalf("接口方法应指向 RebuildWithLogin, got %v", err)
+	}
+
+	_, err = c.RebuildWithLogin(context.Background(), "lhins-a", "ubuntu-24.04", provider.Login{Password: "pw-123"})
+	if err == nil || !strings.Contains(err.Error(), "默认登录用户") {
+		t.Fatalf("Ubuntu 镜像应被拒绝, got %v", err)
+	}
+
+	_, err = c.RebuildWithLogin(context.Background(), "lhins-a", "debian-12", provider.Login{})
+	if err == nil || !strings.Contains(err.Error(), "必须带登录密码") {
+		t.Fatalf("缺密码应被拒绝, got %v", err)
+	}
+
+	if acts := f.actions(); len(acts) != 0 {
+		t.Errorf("三种情况都不该打平台接口, got %v", acts)
+	}
 }
 
 func TestResize(t *testing.T) {

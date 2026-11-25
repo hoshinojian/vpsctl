@@ -275,12 +275,16 @@ vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03
   --image ubuntu-24.04 --count 1 --check         # 先只预检，不花钱
 vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03 \
   --image ubuntu-24.04 --count 1 --wait 300s     # 真建：付一个月，自动续费
+vpsctl rebuild --only lh-1 --ids lh-1/<实例ID> --image debian-12 --confirm 1
+                                                 # 重装：只能到 debian 这类根用户镜像
 ```
 
 - **`--size` 是套餐 ID**（`vpsctl sizes` 可查），不是机型名；区域可以是地域或可用区
 - **每次建机先发一遍预检**（平台的 DryRun），参数 / 库存 / 余额的问题在扣费前报出来；
   `--check` 只走到这一步
-- **只能升配、不能降配**：`resize` 换更贵的套餐；`--resize-disk` 报错（要更大的盘选磁盘更大的套餐）
+- **只能升配、不能降配**：`resize` 换更贵的套餐；`--resize-disk` 报错（要更大的盘选磁盘更大的套餐）。
+  降配会被平台拒（错误原文是没营养的 `Modify instances bundle failed. Please try again later.`），
+  而编排是"关机 → 升配 → 开机"，失败就停在关机状态，需要手动 `vpsctl power --action on`
 - **停机**：`vpsctl delete`（销毁，退款按平台的退还规则走）。不想续费了也可以先在控制台
   关掉自动续费
 - **不支持靠 cloud-init 的置备**：自定义 `--user-data`、高位口（`--ssh-port`）、443 隧道、
@@ -289,10 +293,22 @@ vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03
   `ubuntu`），root 默认禁止 SSH 登录。所以建机时顺带下发一条平台自动执行的命令，等默认
   用户的密码落盘后把**密码哈希**复制给 root 并打开 root 密码登录——命令会留在平台的命令
   记录里，所以里面不出现明文密码
+- **`rebuild` 只能重装到默认用户是 root 的镜像**（`debian-12` 等）。Ubuntu 镜像会被明确
+  拒绝：轻量没有 cloud-init、也没有能重跑初始化命令的通道，重装后 root 拿不到密码，节点
+  会变成"看着正常、实际登不进去"。重装时会用平台的 `LoginConfiguration` 把**同一把密码**
+  重新下发（和建机一样必须带 `AutoGeneratePassword=NO`），所以重装后密码不变；没有密码
+  记录的节点（`--no-password` / `--user-data` 建的）一律拒绝重装
 
-> **这一节的真机验证还没做。** 建机预检、地域 / 套餐 / 镜像 / 密钥对查询、全部读写接口的
-> 鉴权都在真实账号上过了；但建机之后的流程（平台自动执行的命令是否真能把 root 打开、
-> 开关机、重装、升配、销毁）只有单元测试，没有在真机上跑过——建一台就要付一个月。
+> **真机验证（2026-11-25，广州，`bundle_starter_mc_med2_03`→`med2_04`，验完已销毁）。**
+> 建机 + 注入随机密码、root 用密码库里的密码 SSH 登录、关机（8s）/ 开机（7s，公网 IP 不变）、
+> 升配（70s）、重装（128s）、销毁都在真实账号上跑过。建机时那条初始化命令确实执行了：镜像里
+> 出现了 `00-vpsctl-root.conf`，root 的密码哈希与 `ubuntu` 用户逐字节相同。
+>
+> 重装是这一轮唯一踩到的坑：**`ResetInstance` 不会重跑初始化命令**，所以最初的重装会把 root
+> 登录彻底抹掉（root、ubuntu 两个用户都不认那把密码，等 7 分钟无效）。已修成上面那条语义。
+> 另外注意两点：**重装会换 SSH host key**（缓存过指纹的地方要重新接受）；API 建出来的实例
+> 默认放行 22 端口，没有额外防火墙配置。
+
 
 ## 扩展新提供商
 
@@ -308,6 +324,8 @@ vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03
   签名）：两家 API 的最小客户端，带限流 / 5xx 退避重试，别的产品线直接复用
 - `provider.TTLCache`（目录类查询缓存）、`provider.EncodeActionRef`（把地域 / 实例 / 动作编进
   异步句柄）、`provider.RegionIndex`（实例 ID → 地域，地域型 API 按 ID 操作时定位用）
+- 可选能力按需实现（上层用类型断言探测）：`provider.Prechecker`（建机前 DryRun 预检）、
+  `provider.Rebuilder`（重装时要重新下发登录凭据——没有 cloud-init 通道的产品才需要）
 
 参考资料（各家官方客户端，端点语义/分页/签名的"标准答案"）：
 DigitalOcean [godo](https://github.com/digitalocean/godo)、

@@ -311,10 +311,29 @@ func (c *Client) ActionStatus(ctx context.Context, ref provider.ActionRef) (stri
 	return "in-progress", nil
 }
 
-// Rebuild 重装系统盘：保留实例 ID / 公网 IP，磁盘数据清空、不可恢复。重装要求实例
-// 处于关机状态，链路是 运行中则先关机 → 重装并等它结束 → 仍停着才开机。重装被拒
-// 时把为了重装才关掉的实例开回去。
-func (c *Client) Rebuild(ctx context.Context, id, image string) (provider.ActionRef, error) {
+// Rebuild 是 provider.Provider 的接口方法。轻量的重装必须重新下发登录密码（见
+// RebuildWithLogin），这里直接拒绝，免得调用方绕开凭据检查把节点重装成登不进去的状态。
+func (c *Client) Rebuild(_ context.Context, _, _ string) (provider.ActionRef, error) {
+	return provider.ActionRef{}, errors.New("tencent-lighthouse: 重装必须重新下发登录密码，请走 RebuildWithLogin")
+}
+
+// RebuildWithLogin 重装系统盘：保留实例 ID / 公网 IP，磁盘数据清空、不可恢复。
+//
+// 重装的系统盘是全新的，平台的"登录密码"不会保留，所以要用 LoginConfiguration 把同一把
+// 密码重新下发（与建机一样必须带 AutoGeneratePassword=NO，否则平台报参数冲突）。
+//
+// 只能重装到默认登录用户是 root 的镜像（见 rebuildableImage）：轻量没有 cloud-init /
+// 初始化命令通道，Ubuntu 镜像重装后 root 拿不到密码。
+//
+// 重装要求实例处于关机状态，链路是 运行中则先关机 → 重装并等它结束 → 仍停着才开机。
+// 重装被拒时把为了重装才关掉的实例开回去。
+func (c *Client) RebuildWithLogin(ctx context.Context, id, image string, login provider.Login) (provider.ActionRef, error) {
+	if err := rebuildableImage(image); err != nil {
+		return provider.ActionRef{}, err
+	}
+	if login.Password == "" {
+		return provider.ActionRef{}, errors.New("tencent-lighthouse: 重装必须带登录密码，否则节点重装后无法登录")
+	}
 	region, inst, err := c.lookup(ctx, id)
 	if err != nil {
 		return provider.ActionRef{}, err
@@ -346,7 +365,9 @@ func (c *Client) Rebuild(ctx context.Context, id, image string) (provider.Action
 		return c.restorePower(ctx, region, id, err)
 	}
 	err = c.api.Call(ctx, host, service, version, "ResetInstance", region, map[string]any{
-		"InstanceId": id, "BlueprintId": blueprintID,
+		"InstanceId":         id,
+		"BlueprintId":        blueprintID,
+		"LoginConfiguration": map[string]any{"AutoGeneratePassword": "NO", "Password": login.Password},
 	}, nil)
 	if err != nil {
 		return provider.ActionRef{}, abort(fmt.Errorf("腾讯云拒绝了重装（系统盘未动）: %w", err))
@@ -369,6 +390,25 @@ func (c *Client) Rebuild(ctx context.Context, id, image string) (provider.Action
 		}
 	}
 	return provider.EncodeActionRef(region, id, kindRebuild, ""), nil
+}
+
+// rebuildableImage 判断重装到该镜像后节点还能不能用密码登进去。
+//
+// 平台的登录密码落在镜像的**默认用户**上（官方 FAQ：Linux 的默认用户是 root，Ubuntu 是
+// ubuntu）。轻量没有 cloud-init 用户数据、也没有能重跑的初始化命令通道——建机时那条把
+// 密码哈希搬给 root 的命令（InitCommand）只在创建时执行，ResetInstance 不会重跑它。所以
+// Ubuntu 镜像重装后 root 拿不到密码、sshd 也不会放开 root 登录，节点必然登不进去。
+//
+// 实测（2026-11-25，真机）：debian-12 重装后 root 用同一把密码直接可登（镜像本身
+// permitrootlogin / passwordauthentication 都是 yes）；ubuntu 系重装后 root 与 ubuntu
+// 两个用户都拒绝该密码。
+func rebuildableImage(slug string) error {
+	if strings.HasPrefix(slug, "ubuntu") {
+		return fmt.Errorf("tencent-lighthouse: %q 的默认登录用户是 ubuntu 而不是 root；轻量没有"+
+			" cloud-init / 初始化命令通道，重装后把密码搬给 root 的那条命令不会重跑，节点会变得"+
+			" root 登不进去。请改用 debian 等默认用户为 root 的镜像，或销毁后重建", slug)
+	}
+	return nil
 }
 
 // restorePower 是重装链路中途失败后的收拾：把为了重装才关掉的实例开回去。尽力而为——
