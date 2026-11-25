@@ -9,9 +9,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/hoshinojian/vpsctl/internal/config"
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
 func runAccounts(args []string) error {
@@ -58,20 +60,34 @@ func accountsList(args []string) error {
 	return tw.Flush()
 }
 
-// editFlags 抽出 add/edit 共用的凭据字段。
+// editFlags 抽出 add/edit 共用的凭据字段：单 Token 型提供商填 token，
+// 密钥对型（腾讯云、阿里云）填 accessKey + secretKey。
 type editFlags struct {
 	token     string
+	accessKey string
+	secretKey string
 	sshUser   string
 	sshPass   string
 	clearPass bool
 }
 
+// credentialFlags 是 editFlags 里与提供商凭据有关的 flag 名（判断"有没有改任何字段"用）。
+var credentialFlags = []string{"token", "access-key", "secret-key"}
+
 func registerEditFlags(fs *flag.FlagSet, ef *editFlags, editing bool) {
-	tokenLabel := "API Token（必填）"
+	tokenLabel := "API Token（DigitalOcean 用；与 --access-key/--secret-key 二选一）"
 	if editing {
 		tokenLabel = "新 API Token（留空 = 不变）"
 	}
+	keyLabel := "AccessKey ID（腾讯云 SecretId / 阿里云 AccessKey ID；与 --secret-key 成对）"
+	secretLabel := "Secret（腾讯云 SecretKey / 阿里云 AccessKey Secret）"
+	if editing {
+		keyLabel += "，留空 = 不变"
+		secretLabel += "，留空 = 不变"
+	}
 	fs.StringVar(&ef.token, "token", "", tokenLabel)
+	fs.StringVar(&ef.accessKey, "access-key", "", keyLabel)
+	fs.StringVar(&ef.secretKey, "secret-key", "", secretLabel)
 	fs.StringVar(&ef.sshUser, "ssh-user", "", "SSH 用户（编辑时留空 = 不变；新增留空 = root）")
 	fs.StringVar(&ef.sshPass, "ssh-password", "", "SSH 密码（编辑时留空 = 不变）")
 	if editing {
@@ -83,14 +99,14 @@ func accountsAdd(args []string) error {
 	fs := flag.NewFlagSet("accounts add", flag.ExitOnError)
 	accounts := fs.String("accounts", "", "账号配置路径")
 	name := fs.String("name", "", "账号名（唯一，必填）")
-	providerName := fs.String("provider", "digitalocean", "提供商名")
+	providerName := fs.String("provider", "digitalocean", "提供商名（已注册: "+strings.Join(provider.Names(), " / ")+"）")
 	var ef editFlags
 	registerEditFlags(fs, &ef, false)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *name == "" || ef.token == "" {
-		return errors.New("--name 与 --token 必填")
+	if *name == "" || (ef.token == "" && (ef.accessKey == "" || ef.secretKey == "")) {
+		return errors.New("--name 必填；凭据 --token 或 --access-key + --secret-key 二选一必填")
 	}
 	cfg, path, err := loadAccounts(*accounts)
 	if err != nil {
@@ -101,6 +117,7 @@ func accountsAdd(args []string) error {
 	}
 	cfg.Accounts = append(cfg.Accounts, config.Account{
 		Name: *name, Provider: *providerName, Token: ef.token,
+		AccessKey: ef.accessKey, SecretKey: ef.secretKey,
 		SSHUser: ef.sshUser, SSHPassword: ef.sshPass,
 	})
 	if err := config.Save(path, cfg); err != nil {
@@ -124,8 +141,12 @@ func accountsEdit(args []string) error {
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	if !set["token"] && !set["ssh-user"] && !set["ssh-password"] && !set["clear-password"] {
-		return errors.New("没有提供任何要修改的字段（--token/--ssh-user/--ssh-password/--clear-password）")
+	changed := ef.clearPass || set["ssh-user"] || set["ssh-password"]
+	for _, f := range credentialFlags {
+		changed = changed || set[f]
+	}
+	if !changed {
+		return errors.New("没有提供任何要修改的字段（--token/--access-key/--secret-key/--ssh-user/--ssh-password/--clear-password）")
 	}
 	cfg, path, err := loadAccounts(*accounts)
 	if err != nil {
@@ -137,6 +158,13 @@ func accountsEdit(args []string) error {
 	}
 	if set["token"] && ef.token != "" {
 		a.Token = ef.token
+	}
+	// 密钥对成对替换：只给一个或给空值都报错，避免把凭据改成半截
+	if set["access-key"] || set["secret-key"] {
+		if !set["access-key"] || !set["secret-key"] || ef.accessKey == "" || ef.secretKey == "" {
+			return fmt.Errorf("账号 %q：--access-key 与 --secret-key 必须成对且非空", *name)
+		}
+		a.AccessKey, a.SecretKey = ef.accessKey, ef.secretKey
 	}
 	if set["ssh-user"] {
 		a.SSHUser = ef.sshUser

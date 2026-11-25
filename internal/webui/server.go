@@ -34,7 +34,7 @@ type Server struct {
 	cfgPath   string
 
 	// newProvider 可注入（测试）；生产为 provider.New
-	newProvider func(providerName, account, token string) (provider.Provider, error)
+	newProvider func(providerName, account string, cred provider.Credentials) (provider.Provider, error)
 
 	deleteWait   time.Duration // shutdown_first 等待关机完成上限
 	pollEvery    time.Duration
@@ -75,8 +75,8 @@ func New(clients []fleet.AccountClient, cfg *config.File, cfgPath string) *Serve
 		byAccount: byAccount,
 		cfg:       cfg,
 		cfgPath:   cfgPath,
-		newProvider: func(name, account, token string) (provider.Provider, error) {
-			return provider.New(name, account, token, nil)
+		newProvider: func(name, account string, cred provider.Credentials) (provider.Provider, error) {
+			return provider.New(name, account, cred, nil)
 		},
 		deleteWait:   120 * time.Second,
 		pollEvery:    2 * time.Second,
@@ -507,15 +507,28 @@ type accountView struct {
 
 type accountsResponse struct {
 	Accounts  []accountView `json:"accounts"`
-	Providers []string      `json:"providers"` // 已注册可用的提供商名
+	Providers []string      `json:"providers"`     // 已注册可用的提供商名
+	KeyPairs  []string      `json:"key_providers"` // 其中的密钥对型提供商（凭据是 AccessKey + Secret，不是 Token）
 }
 
 type addAccountRequest struct {
 	Name        string `json:"name"`
 	Provider    string `json:"provider"`
 	Token       string `json:"token"`
+	AccessKey   string `json:"access_key"`
+	SecretKey   string `json:"secret_key"`
 	SSHUser     string `json:"ssh_user"`
 	SSHPassword string `json:"ssh_password"`
+}
+
+// hasCredential 判断账号凭据是否齐全：Token 或 AccessKey+SecretKey 二选一。
+func (r addAccountRequest) hasCredential() bool {
+	return r.Token != "" || (r.AccessKey != "" && r.SecretKey != "")
+}
+
+// credentials 取账号凭据（构造客户端用）。
+func (r addAccountRequest) credentials() provider.Credentials {
+	return provider.Credentials{Token: r.Token, AccessKey: r.AccessKey, SecretKey: r.SecretKey}
 }
 
 // loopbackOnly 拦截非回环请求：账号管理与 NMS 载荷涉及凭据读写，
@@ -535,7 +548,12 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _, cfg := s.snapshot()
-	resp := accountsResponse{Providers: provider.Names()}
+	// 未注册任何密钥对型提供商时也回空数组而不是 null，前端按数组处理
+	keyPairs := provider.KeyPairProviders()
+	if keyPairs == nil {
+		keyPairs = []string{}
+	}
+	resp := accountsResponse{Providers: provider.Names(), KeyPairs: keyPairs}
 	for _, a := range cfg.Accounts {
 		resp.Accounts = append(resp.Accounts, accountView{
 			Name: a.Name, Provider: a.Provider, SSHUser: a.SSHUser,
@@ -556,11 +574,11 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if req.Name == "" || req.Token == "" {
-		httpError(w, http.StatusBadRequest, "name/token 必填")
+	if req.Name == "" || !req.hasCredential() {
+		httpError(w, http.StatusBadRequest, "name/token 必填（密钥对型提供商填 access_key + secret_key）")
 		return
 	}
-	p, err := s.newProvider(req.Provider, req.Name, req.Token)
+	p, err := s.newProvider(req.Provider, req.Name, req.credentials())
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
@@ -575,6 +593,7 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfg.Accounts = append(s.cfg.Accounts, config.Account{
 		Name: req.Name, Provider: req.Provider, Token: req.Token,
+		AccessKey: req.AccessKey, SecretKey: req.SecretKey,
 		SSHUser: req.SSHUser, SSHPassword: req.SSHPassword,
 	})
 	if err := config.Save(s.cfgPath, s.cfg); err != nil {
@@ -590,7 +609,7 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name})
 }
 
-// handleEditAccount 编辑账号：只更新请求中出现的字段；token 留空 = 不变；
+// handleEditAccount 编辑账号：只更新请求中出现的字段；凭据留空 = 不变；
 // clear_password=true 显式清除密码。成功后重建该账号客户端并落盘。
 func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 	if !loopbackOnly(r) {
@@ -600,6 +619,8 @@ func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var req struct {
 		Token         *string `json:"token"`
+		AccessKey     *string `json:"access_key"`
+		SecretKey     *string `json:"secret_key"`
 		SSHUser       *string `json:"ssh_user"`
 		SSHPassword   *string `json:"ssh_password"`
 		ClearPassword bool    `json:"clear_password"`
@@ -614,9 +635,19 @@ func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("账号 %q 不存在", name))
 		return
 	}
+	// 密钥对成对替换：两个都给且非空才改，只给一半会把凭据改成半截
+	newKey := req.AccessKey != nil && *req.AccessKey != ""
+	newSecret := req.SecretKey != nil && *req.SecretKey != ""
+	if newKey != newSecret {
+		httpError(w, http.StatusConflict, "access_key 与 secret_key 必须成对修改")
+		return
+	}
 	old := *a
 	if req.Token != nil && *req.Token != "" {
 		a.Token = *req.Token
+	}
+	if newKey {
+		a.AccessKey, a.SecretKey = *req.AccessKey, *req.SecretKey
 	}
 	if req.SSHUser != nil {
 		a.SSHUser = *req.SSHUser
@@ -631,9 +662,9 @@ func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, "保存账号文件失败: "+err.Error())
 		return
 	}
-	// token 变更才需要重建客户端；凭据字段不影响客户端
-	if a.Token != old.Token {
-		if p, err := s.newProvider(a.Provider, a.Name, a.Token); err == nil {
+	// 提供商凭据变更才需要重建客户端；SSH 凭据字段不影响客户端
+	if a.Token != old.Token || a.AccessKey != old.AccessKey || a.SecretKey != old.SecretKey {
+		if p, err := s.newProvider(a.Provider, a.Name, a.Credentials()); err == nil {
 			s.byAccount[a.Name] = p
 			for i := range s.clients {
 				if s.clients[i].Name == a.Name {
@@ -794,6 +825,7 @@ func toServerJSON(s provider.Server) fleet.ServerJSON {
 		Region: s.Region, Size: s.Size, Image: s.Image,
 		VCPUs: s.VCPUs, MemoryMB: s.MemoryMB, DiskGB: s.DiskGB,
 		PriceMonthly: s.PriceMonthly,
+		Currency:     s.Currency,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
 		Lat: s.Lat, Lng: s.Lng,

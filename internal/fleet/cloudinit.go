@@ -30,6 +30,10 @@ type CloudInitParams struct {
 	// AuthorizedKeys 是运维公钥（每行一条，authorized_keys 格式），缺省不注入。
 	// 与节点纳管无关（纳管走密码）——供编排机以密钥运维该机（免密码登录自动化）。
 	AuthorizedKeys []string
+	// ChpasswdCompat 同时下发老的 chpasswd.list 写法。chpasswd.users 是 cloud-init 22.3
+	// 才有的，更老的版本不认、密码会静默不生效（腾讯云的公共镜像就是定制的 20.1）；
+	// list 写法新旧版本都处理。已验证只用 users 写法没问题的提供商不开（DigitalOcean）。
+	ChpasswdCompat bool
 }
 
 // CloudInitSpec 在密码 cloud-config 之上，可选注入 sshd 高位端口与 443 隧道。
@@ -107,6 +111,10 @@ func CloudInitSpec(p CloudInitParams) (string, error) {
 	}
 	b.WriteString("chpasswd:\n")
 	b.WriteString("  expire: false\n")
+	if p.ChpasswdCompat {
+		// 块标量：每行 "用户:密码"，内容按行原样，无转义歧义
+		fmt.Fprintf(&b, "  list: |\n    %s:%s\n", user, p.Password)
+	}
 	b.WriteString("  users:\n")
 	fmt.Fprintf(&b, "    - name: %s\n", user)
 	// YAML 单引号风格：' → ''，其余字符（含反斜杠）原样

@@ -154,7 +154,7 @@ func testServer(t *testing.T, fps map[string]*fakeProvider) *httptest.Server {
 		{Name: "a1", Provider: "digitalocean", Token: "tok-a1", SSHUser: "root", SSHPassword: "pw-a1"},
 	}}
 	s := New(clients, cfg, filepath.Join(t.TempDir(), "accounts.json"))
-	s.newProvider = func(providerName, account, token string) (provider.Provider, error) {
+	s.newProvider = func(providerName, account string, cred provider.Credentials) (provider.Provider, error) {
 		if providerName != "digitalocean" {
 			return nil, fmt.Errorf("未知提供商 %q", providerName)
 		}
@@ -614,7 +614,7 @@ func TestAddAccountPersists(t *testing.T) {
 	s := New([]fleet.AccountClient{}, &config.File{Accounts: []config.Account{
 		{Name: "a1", Provider: "digitalocean", Token: "t1"},
 	}}, cfgPath)
-	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+	s.newProvider = func(string, string, provider.Credentials) (provider.Provider, error) { return &fakeProvider{}, nil }
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
@@ -633,9 +633,126 @@ func TestAddAccountPersists(t *testing.T) {
 	}
 }
 
+// TestAddKeyPairAccount：密钥对型提供商（腾讯云/阿里云）的凭据是 access_key +
+// secret_key，不要求 token；成对给全才收，落盘原样，账号视图不回传任何凭据。
+func TestAddKeyPairAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "accounts.json")
+	seed := &config.File{Accounts: []config.Account{{Name: "a1", Provider: "digitalocean", Token: "t1"}}}
+	if err := config.Save(cfgPath, seed); err != nil {
+		t.Fatal(err)
+	}
+	s := New([]fleet.AccountClient{}, &config.File{Accounts: []config.Account{{Name: "a1", Provider: "digitalocean", Token: "t1"}}}, cfgPath)
+	var gotCred provider.Credentials
+	s.newProvider = func(name, _ string, cred provider.Credentials) (provider.Provider, error) {
+		if name != "tencent-cvm" {
+			return nil, fmt.Errorf("未知提供商 %q", name)
+		}
+		gotCred = cred
+		return &fakeProvider{}, nil
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	code, out := postJSON(t, srv.URL+"/api/accounts", map[string]any{
+		"name": "tc-1", "provider": "tencent-cvm", "access_key": "AKIDexample", "secret_key": "tc-secret",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d out=%v", code, out)
+	}
+	if gotCred != (provider.Credentials{AccessKey: "AKIDexample", SecretKey: "tc-secret"}) {
+		t.Errorf("传给提供商的凭据不符: %+v", gotCred)
+	}
+	f, _, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := f.Find("tc-1")
+	if a == nil || a.AccessKey != "AKIDexample" || a.SecretKey != "tc-secret" || a.Token != "" {
+		t.Errorf("未按密钥对落盘: %+v", a)
+	}
+
+	// 只给一半 → 400；缺凭据 → 400
+	for name, body := range map[string]map[string]any{
+		"只给 access_key": {"name": "tc-2", "provider": "tencent-cvm", "access_key": "AKIDonly"},
+		"只给 secret_key": {"name": "tc-3", "provider": "tencent-cvm", "secret_key": "secret-only"},
+		"都没给":           {"name": "tc-4", "provider": "tencent-cvm"},
+	} {
+		code, _ = postJSON(t, srv.URL+"/api/accounts", body)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s 应 400, got %d", name, code)
+		}
+	}
+
+	// 账号视图不回传凭据，并给出密钥对型提供商清单（本测试包未注册任何一家，应为空数组）
+	resp, err := http.Get(srv.URL + "/api/accounts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "tc-secret") || strings.Contains(string(body), "AKIDexample") {
+		t.Errorf("账号视图泄漏了密钥对: %s", body)
+	}
+	if !strings.Contains(string(body), `"key_providers":[]`) {
+		t.Errorf("缺 key_providers 空数组: %s", body)
+	}
+}
+
+// TestEditAccountKeyPair：密钥对编辑必须成对；改了凭据要用新凭据重建客户端。
+func TestEditAccountKeyPair(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "accounts.json")
+	accounts := []config.Account{{Name: "tc-1", Provider: "tencent-cvm", AccessKey: "AKIDold", SecretKey: "old-secret"}}
+	if err := config.Save(cfgPath, &config.File{Accounts: accounts}); err != nil {
+		t.Fatal(err)
+	}
+	s := New([]fleet.AccountClient{}, &config.File{Accounts: accounts}, cfgPath)
+	var gotCred provider.Credentials
+	s.newProvider = func(_, _ string, cred provider.Credentials) (provider.Provider, error) {
+		gotCred = cred
+		return &fakeProvider{}, nil
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// 只改一半 → 拒绝，且不动盘上的文件
+	code, _ := sendJSON(t, http.MethodPut, srv.URL+"/api/accounts/tc-1", map[string]any{"access_key": "AKIDhalf"})
+	if code != http.StatusConflict {
+		t.Fatalf("只改 access_key 应 409, got %d", code)
+	}
+	if gotCred.AccessKey != "" {
+		t.Errorf("被拒的编辑不应重建客户端: %+v", gotCred)
+	}
+
+	code, _ = sendJSON(t, http.MethodPut, srv.URL+"/api/accounts/tc-1", map[string]any{"access_key": "AKIDnew", "secret_key": "new-secret"})
+	if code != http.StatusOK {
+		t.Fatalf("成对修改应 200, got %d", code)
+	}
+	if gotCred != (provider.Credentials{AccessKey: "AKIDnew", SecretKey: "new-secret"}) {
+		t.Errorf("重建客户端未用新凭据: %+v", gotCred)
+	}
+	f, _, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := f.Find("tc-1"); a.AccessKey != "AKIDnew" || a.SecretKey != "new-secret" {
+		t.Errorf("编辑未落盘: %+v", a)
+	}
+
+	// 只改 SSH 密码不触碰提供商凭据 → 不重建客户端
+	gotCred = provider.Credentials{}
+	code, _ = sendJSON(t, http.MethodPut, srv.URL+"/api/accounts/tc-1", map[string]any{"ssh_password": "pw"})
+	if code != http.StatusOK {
+		t.Fatalf("改 SSH 密码应 200, got %d", code)
+	}
+	if gotCred.AccessKey != "" {
+		t.Errorf("只改 SSH 密码不应重建客户端: %+v", gotCred)
+	}
+}
+
 func TestWriteEndpointsRejectNonLoopback(t *testing.T) {
 	s := New([]fleet.AccountClient{}, &config.File{}, filepath.Join(t.TempDir(), "accounts.json"))
-	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+	s.newProvider = func(string, string, provider.Credentials) (provider.Provider, error) { return &fakeProvider{}, nil }
 
 	for _, tc := range []struct {
 		name, method, path string
@@ -811,7 +928,7 @@ func TestEditAndRemoveAccount(t *testing.T) {
 		{Name: "a2", ProviderName: "digitalocean", Provider: &fakeProvider{}},
 	}
 	s := New(clients, cfg, cfgPath)
-	s.newProvider = func(string, string, string) (provider.Provider, error) { return &fakeProvider{}, nil }
+	s.newProvider = func(string, string, provider.Credentials) (provider.Provider, error) { return &fakeProvider{}, nil }
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 

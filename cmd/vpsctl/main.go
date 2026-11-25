@@ -1,14 +1,16 @@
-// vpsctl 是跨 VPS 提供商的节点供给/回收小工具（当前支持 DigitalOcean）。
+// vpsctl 是跨 VPS 提供商的节点供给/回收小工具（DigitalOcean、腾讯云 CVM、阿里云 ECS）。
 package main
 
 import (
 	"fmt"
 	"os"
 
+	_ "github.com/hoshinojian/vpsctl/internal/provider/aliyun/ecs"
 	_ "github.com/hoshinojian/vpsctl/internal/provider/digitalocean"
+	_ "github.com/hoshinojian/vpsctl/internal/provider/tencent/cvm"
 )
 
-const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean 先行）
+const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean / 腾讯云 CVM / 阿里云 ECS）
 
 用法:
   vpsctl create [flags]             多账号批量创建节点，输出 JSON

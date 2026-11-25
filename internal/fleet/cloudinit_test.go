@@ -39,6 +39,30 @@ func TestCloudInitPasswordQuotesYAML(t *testing.T) {
 	}
 }
 
+// TestCloudInitChpasswdCompat：兼容写法在 users 段之外多给一份老的 chpasswd.list
+// （块标量，每行 "用户:密码"，密码原样落盘不被 YAML 转义）；不开时生成结果保持原样。
+func TestCloudInitChpasswdCompat(t *testing.T) {
+	got, err := CloudInitSpec(CloudInitParams{User: "root", Password: "it's:a#b", ChpasswdCompat: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  list: |\n    root:it's:a#b\n", // 老写法：cloud-init < 22.3 只认这个
+		"      password: 'it''s:a#b'",    // 新写法照旧
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("生成结果缺 %q:\n%s", want, got)
+		}
+	}
+	plain, err := CloudInitPassword("root", "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "list:") {
+		t.Errorf("未开兼容时不应出现 list 段:\n%s", plain)
+	}
+}
+
 func TestCloudInitPasswordDefaults(t *testing.T) {
 	got, err := CloudInitPassword("", "pw")
 	if err != nil {
