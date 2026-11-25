@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
 
 // FileName 是密码库文件名，与 accounts.json 放在同一目录。
@@ -79,12 +80,16 @@ type Spec struct {
 }
 
 // Provision 给计划里的每台节点生成一个随机密码，把各自的 cloud-init 放进
-// o.UserDataByNode（优先级高于按账号 / 全局的 user-data），返回"节点名 → 凭据"。
+// o.UserDataByNode（优先级高于按账号 / 全局的 user-data），同一份凭据的结构化形式放进
+// o.LoginByNode（给没有 cloud-init 的提供商用），返回"节点名 → 凭据"。
 // 只生成、不落库：要等建机结果出来、拿到实例 ID 才能入库（见 Store.RecordCreated）。
 func Provision(o *fleet.Options, specs map[string]Spec) (map[string]Entry, error) {
 	generated := make(map[string]Entry)
 	if o.UserDataByNode == nil {
 		o.UserDataByNode = map[string]string{}
+	}
+	if o.LoginByNode == nil {
+		o.LoginByNode = map[string]provider.Login{}
 	}
 	for _, ac := range o.Clients {
 		spec := specs[ac.Name]
@@ -105,6 +110,7 @@ func Provision(o *fleet.Options, specs map[string]Spec) (map[string]Entry, error
 				return nil, fmt.Errorf("账号 %s: %w", ac.Name, err)
 			}
 			o.UserDataByNode[name] = ud
+			o.LoginByNode[name] = provider.Login{User: user, Password: pw}
 			generated[name] = Entry{User: user, Password: pw}
 		}
 	}

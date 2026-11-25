@@ -8,7 +8,25 @@ import (
 	"fmt"
 
 	"github.com/hoshinojian/vpsctl/internal/fleet"
+	"github.com/hoshinojian/vpsctl/internal/nodepass"
+	"github.com/hoshinojian/vpsctl/internal/provider"
 )
+
+// loginFromStore 返回"按账号 / 实例 ID 取登录凭据"的查询函数，供需要重新下发密码的
+// 提供商（轻量应用服务器）在重装时使用。取不到表示这台节点没有可下发的密码。
+func loginFromStore(cfgPath string) (fleet.LoginFor, error) {
+	stored, err := nodepass.Open(nodepass.PathFor(cfgPath)).Load()
+	if err != nil {
+		return nil, err
+	}
+	return func(account, id string) (provider.Login, bool) {
+		e, ok := stored[nodepass.Key(account, id)]
+		if !ok || e.Password == "" {
+			return provider.Login{}, false
+		}
+		return provider.Login{User: e.User, Password: e.Password}, true
+	}, nil
+}
 
 func runRebuild(args []string) error {
 	fs := flag.NewFlagSet("rebuild", flag.ExitOnError)
@@ -26,7 +44,7 @@ func runRebuild(args []string) error {
 	if *image == "" {
 		return errors.New("--image 必填（重装会清空磁盘，请确认镜像 slug）")
 	}
-	cfg, _, err := loadAccounts(*accounts)
+	cfg, cfgPath, err := loadAccounts(*accounts)
 	if err != nil {
 		return err
 	}
@@ -51,7 +69,11 @@ func runRebuild(args []string) error {
 	if err := confirmCount(len(targets), *confirm); err != nil {
 		return err
 	}
-	res := fleet.RebuildBatch(ctx, clients, targets, *image, *wait, 0)
+	loginFor, err := loginFromStore(cfgPath)
+	if err != nil {
+		return err
+	}
+	res := fleet.RebuildBatch(ctx, clients, targets, *image, *wait, 0, loginFor)
 	if err := printJSON(res, *output); err != nil {
 		return err
 	}

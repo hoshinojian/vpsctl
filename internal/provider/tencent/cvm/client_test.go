@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/hoshinojian/vpsctl/internal/provider"
+	"github.com/hoshinojian/vpsctl/internal/provider/tencent"
 )
 
 // seeded 起一套三个地域的假环境：北京有默认 VPC 与两个子网、三张镜像、一把密钥；
@@ -131,7 +132,7 @@ func TestImageSlug(t *testing.T) {
 		{image{Platform: "TencentOS", ImageName: "TencentOS Server 3.1 (TK4)"}, "tencentos-3.01"},
 	}
 	for _, c := range cases {
-		if got := imageSlug(c.image); got != c.want {
+		if got := tencent.ImageSlug(c.image.Platform, c.image.ImageName); got != c.want {
 			t.Errorf("imageSlug(%q) = %q, want %q", c.image.ImageName, got, c.want)
 		}
 	}
@@ -195,7 +196,7 @@ func TestHostNameAndToken(t *testing.T) {
 			t.Errorf("主机名 %q 不合法，应返回空", bad)
 		}
 	}
-	tok := clientToken("vps-节点-with-中文-and-a-long-suffix")
+	tok := tencent.ClientToken("vps-节点-with-中文-and-a-long-suffix")
 	if len(tok) > 64 || !strings.HasPrefix(tok, "vpsctl-") {
 		t.Errorf("clientToken = %q（应以 vpsctl- 开头且 ≤64）", tok)
 	}
@@ -204,7 +205,7 @@ func TestHostNameAndToken(t *testing.T) {
 			t.Errorf("clientToken 含非 ASCII 可打印字符: %q", tok)
 		}
 	}
-	if clientToken("a") == clientToken("a") {
+	if tencent.ClientToken("a") == tencent.ClientToken("a") {
 		t.Error("两次生成的幂等令牌不应相同")
 	}
 }
@@ -220,16 +221,16 @@ func TestSSHFingerprint(t *testing.T) {
 	sum := md5.Sum(blob) //nolint:gosec
 	want := colonHex(sum[:])
 	line := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(blob) + " me@host"
-	if got := sshFingerprint(line); got != want {
+	if got := tencent.SSHFingerprint(line); got != want {
 		t.Errorf("sshFingerprint = %q, want %q", got, want)
 	}
 	// 只取第二段当公钥体；段数不够或不是 base64 时返回空串
-	if got := sshFingerprint("ssh-ed25519 " + base64.StdEncoding.EncodeToString(blob) + " trailing:colon"); got != want {
+	if got := tencent.SSHFingerprint("ssh-ed25519 " + base64.StdEncoding.EncodeToString(blob) + " trailing:colon"); got != want {
 		t.Errorf("带冒号的注释不应影响指纹, got %q", got)
 	}
 	for _, bad := range []string{"", "ssh-rsa", "ssh-rsa !!! not-base64"} {
-		if got := sshFingerprint(bad); got != "" {
-			t.Errorf("sshFingerprint(%q) = %q, want 空", bad, got)
+		if got := tencent.SSHFingerprint(bad); got != "" {
+			t.Errorf("tencent.SSHFingerprint(%q) = %q, want 空", bad, got)
 		}
 	}
 }

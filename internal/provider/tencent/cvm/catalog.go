@@ -2,8 +2,6 @@ package cvm
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // 公钥指纹算法本身是 MD5，不是安全用途
-	"encoding/base64"
 	"fmt"
 	"regexp"
 	"sort"
@@ -11,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/hoshinojian/vpsctl/internal/provider"
+	"github.com/hoshinojian/vpsctl/internal/provider/tencent"
 )
 
 // ---- 地域 ----
@@ -90,33 +89,11 @@ func (c *Client) publicImages(ctx context.Context, region string) ([]image, erro
 	return all, nil
 }
 
-// imageVersion 抓镜像名里的第一个"主版本[.次版本]"，如 "Ubuntu Server 24.04 LTS
-// 64bit" → 24.04。OsVersion 字段不可靠（新镜像常是 0.0.0），只能从名字里取。
-var imageVersion = regexp.MustCompile(`(\d+)(?:\.(\d+))?`)
-
 // plainOS 判断公共镜像是不是"纯系统镜像"。腾讯云把预装了应用的镜像也归在公共
 // 镜像里，名字形如 "DeepSeek Harness on Ubuntu24.04"；纯系统镜像的名字以发行版
 // 名开头（"Ubuntu Server 24.04 LTS 64bit"）。
 func plainOS(im image) bool {
 	return im.Platform != "" && strings.HasPrefix(strings.ToLower(im.ImageName), strings.ToLower(im.Platform))
-}
-
-// imageSlug 由镜像的发行版与版本号生成跨地域稳定的 slug：小写发行版名 + 主版本
-// [+ 两位次版本]，如 ubuntu-24.04、centos-7.09、opencloudos-9.02。
-func imageSlug(im image) string {
-	distro := strings.ToLower(strings.Join(strings.Fields(im.Platform), "-"))
-	m := imageVersion.FindStringSubmatch(im.ImageName)
-	if m == nil {
-		return distro
-	}
-	major, minor := m[1], m[2]
-	if len(minor) == 1 {
-		minor = "0" + minor
-	}
-	if minor == "" || minor == "00" {
-		return distro + "-" + major
-	}
-	return distro + "-" + major + "." + minor
 }
 
 // imageScore 给同一 slug 下的镜像变体排序，分小者优先：同版本常有 ARM、UEFI、
@@ -142,7 +119,7 @@ func catalogImages(images []image) map[string]image {
 		if !plainOS(im) {
 			continue
 		}
-		slug := imageSlug(im)
+		slug := tencent.ImageSlug(im.Platform, im.ImageName)
 		cur, ok := bySlug[slug]
 		if !ok || imageScore(im) < imageScore(cur) ||
 			(imageScore(im) == imageScore(cur) && im.ImageName < cur.ImageName) {
@@ -212,7 +189,7 @@ func (c *Client) imageSlugByID(ctx context.Context, region, imageID string) stri
 		"Filters": []map[string]any{{"Name": "image-id", "Values": []string{imageID}}},
 	}, &page)
 	if err == nil && len(page.ImageSet) > 0 {
-		slug = imageSlug(page.ImageSet[0])
+		slug = tencent.ImageSlug(page.ImageSet[0].Platform, page.ImageSet[0].ImageName)
 	}
 	c.slugs.Put(key, slug) // 查不到也缓存空串，免得每次列表都重打
 	return slug
@@ -338,7 +315,7 @@ func (c *Client) SSHKeys(ctx context.Context) ([]provider.SSHKey, error) {
 	}
 	out := make([]provider.SSHKey, 0, len(pairs))
 	for _, k := range pairs {
-		out = append(out, provider.SSHKey{ID: k.KeyPairId, Name: k.KeyName, Fingerprint: sshFingerprint(k.PublicKey)})
+		out = append(out, provider.SSHKey{ID: k.KeyPairId, Name: k.KeyName, Fingerprint: tencent.SSHFingerprint(k.PublicKey)})
 	}
 	return out, nil
 }
@@ -377,7 +354,7 @@ func (c *Client) resolveSSHKeys(ctx context.Context, region string, in []string)
 	for _, want := range toResolve {
 		found := ""
 		for _, k := range pairs {
-			if k.KeyName == want || sshFingerprint(k.PublicKey) == want {
+			if k.KeyName == want || tencent.SSHFingerprint(k.PublicKey) == want {
 				found = k.KeyPairId
 				break
 			}
@@ -393,25 +370,6 @@ func (c *Client) resolveSSHKeys(ctx context.Context, region string, in []string)
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-// sshFingerprint 按 OpenSSH 的算法算公钥指纹：base64 解码后的 MD5，小写冒号分隔
-// 十六进制（与 DigitalOcean 的指纹写法一致）。公钥格式不对时返回空串。
-func sshFingerprint(pub string) string {
-	fields := strings.Fields(pub)
-	if len(fields) < 2 {
-		return ""
-	}
-	raw, err := base64.StdEncoding.DecodeString(fields[1])
-	if err != nil {
-		return ""
-	}
-	sum := md5.Sum(raw) //nolint:gosec
-	parts := make([]string, 0, len(sum))
-	for _, b := range sum {
-		parts = append(parts, fmt.Sprintf("%02x", b))
-	}
-	return strings.Join(parts, ":")
 }
 
 // ---- 询价 ----

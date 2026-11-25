@@ -457,6 +457,22 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resultsResponse{Results: results})
 }
 
+// loginFor 取"按账号 / 实例 ID 查登录凭据"的函数，供需要重新下发密码的提供商
+// （轻量应用服务器）在重装时使用。
+func (s *Server) loginFor() (fleet.LoginFor, error) {
+	stored, err := nodepass.Open(s.passPath).Load()
+	if err != nil {
+		return nil, err
+	}
+	return func(account, id string) (provider.Login, bool) {
+		e, ok := stored[nodepass.Key(account, id)]
+		if !ok || e.Password == "" {
+			return provider.Login{}, false
+		}
+		return provider.Login{User: e.User, Password: e.Password}, true
+	}, nil
+}
+
 // handleRebuild 重装选中节点（镜像必填，磁盘清空不可恢复）。
 func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -476,7 +492,12 @@ func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 	clients, _, _ := s.snapshot()
 	targets := toFleetTargets(req.Targets)
-	res := fleet.RebuildBatch(r.Context(), clients, targets, req.Image, s.deleteWait, s.pollEvery)
+	loginFor, err := s.loginFor()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	res := fleet.RebuildBatch(r.Context(), clients, targets, req.Image, s.deleteWait, s.pollEvery, loginFor)
 	ok, fail := 0, 0
 	for _, x := range res {
 		if x.OK {

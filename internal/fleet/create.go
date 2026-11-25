@@ -39,6 +39,9 @@ type Options struct {
 	// UserDataByNode 节点专属 user-data（键为节点名，如每台一个随机密码），存在时优先于
 	// UserDataByAccount 与 UserData。
 	UserDataByNode map[string]string
+	// LoginByNode 是 UserDataByNode 里那份登录凭据的结构化形式（键为节点名），给没有
+	// cloud-init、只能靠平台接口设密码的提供商用。
+	LoginByNode map[string]provider.Login
 	// SSHPort 是建机时注入的 sshd 监听端口（0/22 = 不动缺省）。非缺省时写进
 	// 自动生成的 cloud-init（见 CloudInit），并回填进结果 JSON 的 ssh_port，
 	// 供 NMS 导入载荷逐节点取用。
@@ -169,6 +172,27 @@ func Plan(o Options) ([]PlanEntry, error) {
 	return entries, nil
 }
 
+// RequestFor 组装某个账号下指定节点的建机请求。批量建机与建机前预检
+// （cmd 的 --check）共用这一份，保证预检查的就是将要真发的那份请求。
+func (o Options) RequestFor(ac AccountClient, name, batch string) provider.CreateRequest {
+	userData := o.UserData
+	if ud, ok := o.UserDataByAccount[ac.Name]; ok {
+		userData = ud
+	}
+	if ud, ok := o.UserDataByNode[name]; ok {
+		userData = ud
+	}
+	return provider.CreateRequest{
+		Name: name, Region: o.Region, Size: o.Size, Image: o.Image,
+		SSHKeys:    o.SSHKeys,
+		Tags:       append(append([]string{}, o.ExtraTags...), "batch:"+batch),
+		UserData:   userData,
+		Monitoring: o.Monitoring,
+		Login:      o.LoginByNode[name],
+		SSHPort:    o.SSHPort, Tunnel443: o.Tunnel443, AuthorizedKeys: o.AuthorizedKeys,
+	}
+}
+
 // ServerJSON 是结果 JSON 中的单台节点。
 type ServerJSON struct {
 	Account      string    `json:"account"`
@@ -182,7 +206,8 @@ type ServerJSON struct {
 	MemoryMB     int       `json:"memory_mb"`
 	DiskGB       int       `json:"disk_gb"`
 	PriceMonthly float64   `json:"price_monthly"`
-	Currency     string    `json:"currency,omitempty"` // price_monthly 的币种；空 = USD，不同币种不可相加
+	ExpiresAt    time.Time `json:"expires_at,omitzero"` // 包年包月节点的到期时间；按量节点不带
+	Currency     string    `json:"currency,omitempty"`  // price_monthly 的币种；空 = USD，不同币种不可相加
 	IPv4Public   string    `json:"ipv4_public,omitempty"`
 	IPv4Private  string    `json:"ipv4_private,omitempty"`
 	SSHPort      int       `json:"ssh_port,omitempty"` // 建机注入的 sshd 端口（缺省 0 = 未指定/22）
@@ -270,20 +295,7 @@ func createAccount(ctx context.Context, o Options, ac AccountClient, batch strin
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			userData := o.UserData
-			if ud, ok := o.UserDataByAccount[ac.Name]; ok {
-				userData = ud
-			}
-			if ud, ok := o.UserDataByNode[name]; ok {
-				userData = ud
-			}
-			s, err := ac.Provider.Create(ctx, provider.CreateRequest{
-				Name: name, Region: o.Region, Size: o.Size, Image: o.Image,
-				SSHKeys:    o.SSHKeys,
-				Tags:       append(append([]string{}, o.ExtraTags...), "batch:"+batch),
-				UserData:   userData,
-				Monitoring: o.Monitoring,
-			})
+			s, err := ac.Provider.Create(ctx, o.RequestFor(ac, name, batch))
 			if err != nil {
 				mu.Lock()
 				out.errs = append(out.errs, ErrorJSON{
@@ -364,6 +376,7 @@ func ToServerJSON(s provider.Server) ServerJSON {
 		VCPUs: s.VCPUs, MemoryMB: s.MemoryMB, DiskGB: s.DiskGB,
 		PriceMonthly: s.PriceMonthly,
 		Currency:     s.Currency,
+		ExpiresAt:    s.ExpiresAt,
 		IPv4Public:   s.IPv4Public, IPv4Private: s.IPv4Private,
 		Tags: s.Tags, CreatedAt: s.CreatedAt,
 		Lat: s.Lat, Lng: s.Lng,

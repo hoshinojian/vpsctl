@@ -1,8 +1,8 @@
 # vpsctl
 
 跨 VPS 提供商的节点供给/回收小工具。Go 单二进制、零第三方依赖；多账号配置驱动；
-本地 Web 管理台；当前支持 **DigitalOcean、腾讯云 CVM、阿里云 ECS**（三家都按量计费、随建随删），
-后续按同一 Provider 接口继续扩展。
+本地 Web 管理台；当前支持 **DigitalOcean、腾讯云 CVM、阿里云 ECS**（三家都按量计费、随建随删）与
+**腾讯云轻量应用服务器**（包年包月），后续按同一 Provider 接口继续扩展。
 
 > **凭据安全（本仓库为 public）**：真实 API token 只放本地
 > `~/.config/vpsctl/accounts.json`（建议 600 权限）和节点密码库
@@ -78,6 +78,7 @@ vpsctl create \
 | `--no-password` | 什么都不注入（缺省每台节点一个随机 root 密码并记入本地密码库） |
 | `--wait 300s` | 等待节点 active 且公网 IPv4 就绪（轮询）；0 不等待 |
 | `--dry-run` | 只打印创建计划，不调任何 API |
+| `--check` | 只做建机前的提供商预检（云厂商的 DryRun），不创建任何资源 |
 | `--output` | 结果 JSON 另存路径（stdout 始终输出） |
 
 - 多账号并行、账号内并发受限（4），逐台记录成败；**部分失败时 JSON 照常完整输出、退出码 1**
@@ -240,6 +241,7 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
   改配完成后平台还要收尾一小会儿，这期间的开机请求 vpsctl 会自动等待重试
 - **重装**是 关机 → 重装系统盘 → 开机，保留实例 ID / 公网 IP。镜像是否适配机型只能由平台判定：
   建机时 `DryRun` 预检会拦下；重装时才被拒的话系统盘不会动，实例会恢复开机
+- **建机前可先 `--check`**：只做提供商预检（云厂商的 DryRun），不创建任何资源
 - **一次未复现的故障留档**：腾讯云有一台测试机在"重装完成约 30 秒后改配"之后 22 端口被拒
   （实例显示运行中、能 ping 通），关机再开机无效，重装后恢复；之后 4 次相同或相近的操作都正常，
   原因未查明。遇到类似情况先用 `vpsctl rebuild` 恢复
@@ -260,6 +262,57 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
   `UnauthorizedOperation: Since you have no payment rights and cannot complete the payment`。
   这一条 `DryRun` 预检发现不了（预检会通过，真下单才被拒）
 
+## 腾讯云轻量应用服务器（`tencent-lighthouse`）
+
+**包年包月**：建一次就付一个月，到期自动续费。和 DO 那种"按小时、随建随删"是两种用法——
+适合长期在线的节点，不适合做实验。阿里云轻量应用服务器暂未支持（它的 OpenAPI 没有公开的
+销毁接口，也没有关闭自动续费的接口，做不了"跟 DO 一样"）。
+
+```sh
+vpsctl sizes  --only lh-1                        # 套餐自带月价（广州 2 核 2G 约 ¥35–55/月）
+vpsctl images --only lh-1                        # 镜像 slug 与云服务器同一套（ubuntu-24.04…）
+vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03 \
+  --image ubuntu-24.04 --count 1 --check         # 先只预检，不花钱
+vpsctl create --only lh-1 --region ap-guangzhou --size bundle_starter_mc_med2_03 \
+  --image ubuntu-24.04 --count 1 --wait 300s     # 真建：付一个月，自动续费
+vpsctl rebuild --only lh-1 --ids lh-1/<实例ID> --image debian-12 --confirm 1
+                                                 # 重装：只能到 debian 这类根用户镜像
+```
+
+- **`--size` 是套餐 ID**（`vpsctl sizes` 可查），不是机型名；区域可以是地域或可用区
+- **每次建机先发一遍预检**（平台的 DryRun），参数 / 库存 / 余额的问题在扣费前报出来；
+  `--check` 只走到这一步
+- **只能升配、不能降配**：`resize` 换更贵的套餐；`--resize-disk` 报错（要更大的盘选磁盘更大的套餐）。
+  降配会被平台拒（错误原文是没营养的 `Modify instances bundle failed. Please try again later.`），
+  而编排是"关机 → 升配 → 开机"，失败就停在关机状态，需要手动 `vpsctl power --action on`
+- **停机**：`vpsctl delete`（销毁）。包年包月实例平台要求两步：先 `IsolateInstances` 退还
+  （实例进入 `SHUTDOWN`，退款流程随之启动），再 `TerminateInstances` 真正销毁——直接发
+  销毁请求对运行中和已关机的实例都会被拒。不想续费了也可以先在控制台关掉自动续费
+- **不支持靠 cloud-init 的置备**：自定义 `--user-data`、高位口（`--ssh-port`）、443 隧道、
+  `--authorized-keys` 都会在建机前被明确拒绝；登录密钥用 `--ssh-keys`
+- **随机 root 密码走平台的"登录密码"**：平台的密码落在镜像的默认用户上（Ubuntu 是
+  `ubuntu`），root 默认禁止 SSH 登录。所以建机时顺带下发一条平台自动执行的命令，等默认
+  用户的密码落盘后把**密码哈希**复制给 root 并打开 root 密码登录——命令会留在平台的命令
+  记录里，所以里面不出现明文密码
+- **`rebuild` 只能重装到默认用户是 root 的镜像**（`debian-12` 等）。Ubuntu 镜像会被明确
+  拒绝：轻量没有 cloud-init、也没有能重跑初始化命令的通道，重装后 root 拿不到密码，节点
+  会变成"看着正常、实际登不进去"。重装时会用平台的 `LoginConfiguration` 把**同一把密码**
+  重新下发（和建机一样必须带 `AutoGeneratePassword=NO`），所以重装后密码不变；没有密码
+  记录的节点（`--no-password` / `--user-data` 建的）一律拒绝重装
+
+> **真机验证（2026-11-25，广州，`bundle_starter_mc_med2_03`→`med2_04`，验完已销毁）。**
+> 建机 + 注入随机密码、root 用密码库里的密码 SSH 登录、关机（8s）/ 开机（7s，公网 IP 不变）、
+> 升配（70s）、重装（128s）、销毁（58s）都在真实账号上跑过。建机时那条初始化命令确实执行了：
+> 镜像里出现了 `00-vpsctl-root.conf`，root 的密码哈希与 `ubuntu` 用户逐字节相同。
+>
+> 这一轮踩到两个坑，都已修：**`ResetInstance` 不会重跑初始化命令**，最初的重装会把 root 登录
+> 彻底抹掉（root、ubuntu 两个用户都不认那把密码，等 7 分钟无效）；**`TerminateInstances`
+> 只接受 `SHUTDOWN` 状态的实例**，最初的 `delete` 对运行中和已关机的实例都报
+> `UnsupportedOperation.InvalidInstanceState`，也就是销毁接口原本完全不可用。
+> 另外注意两点：**重装会换 SSH host key**（缓存过指纹的地方要重新接受）；API 建出来的实例
+> 默认放行 22 端口，没有额外防火墙配置。
+
+
 ## 扩展新提供商
 
 1. 新建 `internal/provider/<name>/`，实现 `provider.Provider` 接口（List/Get/Create/Delete/Power/ActionStatus/Rebuild/Resize/SSHKeys/Regions/Sizes/Images）
@@ -274,6 +327,8 @@ vpsctl create --only tc-1 --region ap-beijing --size SA5.MEDIUM2 --image ubuntu-
   签名）：两家 API 的最小客户端，带限流 / 5xx 退避重试，别的产品线直接复用
 - `provider.TTLCache`（目录类查询缓存）、`provider.EncodeActionRef`（把地域 / 实例 / 动作编进
   异步句柄）、`provider.RegionIndex`（实例 ID → 地域，地域型 API 按 ID 操作时定位用）
+- 可选能力按需实现（上层用类型断言探测）：`provider.Prechecker`（建机前 DryRun 预检）、
+  `provider.Rebuilder`（重装时要重新下发登录凭据——没有 cloud-init 通道的产品才需要）
 
 参考资料（各家官方客户端，端点语义/分页/签名的"标准答案"）：
 DigitalOcean [godo](https://github.com/digitalocean/godo)、

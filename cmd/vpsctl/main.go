@@ -8,9 +8,10 @@ import (
 	_ "github.com/hoshinojian/vpsctl/internal/provider/aliyun/ecs"
 	_ "github.com/hoshinojian/vpsctl/internal/provider/digitalocean"
 	_ "github.com/hoshinojian/vpsctl/internal/provider/tencent/cvm"
+	_ "github.com/hoshinojian/vpsctl/internal/provider/tencent/lighthouse"
 )
 
-const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean / 腾讯云 CVM / 阿里云 ECS）
+const usage = `vpsctl — VPS 供给/回收工具（DigitalOcean / 腾讯云 CVM / 阿里云 ECS / 腾讯云轻量）
 
 用法:
   vpsctl create [flags]             多账号批量创建节点，输出 JSON

@@ -341,8 +341,8 @@ func (c *Client) toServer(region string, inst instance) provider.Server {
 		Tags:        tagStrings(inst.Tags),
 		CreatedAt:   parseTime(inst.CreatedTime),
 	}
-	if g, ok := regionGeo[region]; ok {
-		s.Lat, s.Lng = g.lat, g.lng
+	if lat, lng, ok := tencent.RegionGeo(region); ok {
+		s.Lat, s.Lng = lat, lng
 	}
 	// 只有按量实例能问到小时单价；包年包月实例的月费这里算不出来，留空
 	if inst.InstanceChargeType == postpaid && inst.InstanceType != "" {

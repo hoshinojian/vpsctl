@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -333,5 +334,37 @@ func TestCreateWaitTimeoutKeepsNode(t *testing.T) {
 	}
 	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Error, "已创建") {
 		t.Errorf("errors = %+v", res.Errors)
+	}
+}
+
+// TestRequestFor：按节点的 user-data 与登录凭据优先于按账号 / 全局的；高位口、隧道、
+// 运维公钥、批次标签原样带进建机请求——建机前预检查的就是这一份。
+func TestRequestFor(t *testing.T) {
+	ac := AccountClient{Name: "a1"}
+	o := Options{
+		UserData: "global", UserDataByAccount: map[string]string{"a1": "by-acct"},
+		UserDataByNode: map[string]string{"n1": "by-node"},
+		LoginByNode:    map[string]provider.Login{"n1": {User: "root", Password: "pw"}},
+		Region:         "r", Size: "s", Image: "i", ExtraTags: []string{"env:lab"},
+		SSHPort: 40222, Tunnel443: true, AuthorizedKeys: []string{"ssh-ed25519 AAAA"}, Monitoring: true,
+	}
+	got := o.RequestFor(ac, "n1", "b1")
+	if got.Name != "n1" || got.Region != "r" || got.Size != "s" || got.Image != "i" || !got.Monitoring {
+		t.Errorf("基础字段不符: %+v", got)
+	}
+	if got.UserData != "by-node" || got.Login != (provider.Login{User: "root", Password: "pw"}) {
+		t.Errorf("应取节点专属的 user-data 与登录凭据: %+v", got)
+	}
+	if got.SSHPort != 40222 || !got.Tunnel443 || len(got.AuthorizedKeys) != 1 {
+		t.Errorf("cloud-init 相关置备应原样带进请求: %+v", got)
+	}
+	if !slices.Equal(got.Tags, []string{"env:lab", "batch:b1"}) {
+		t.Errorf("标签 = %v", got.Tags)
+	}
+	if other := o.RequestFor(ac, "n2", "b1"); other.UserData != "by-acct" || other.Login.Password != "" {
+		t.Errorf("没有节点专属置备时应回落到账号级: %+v", other)
+	}
+	if global := o.RequestFor(AccountClient{Name: "a2"}, "n3", "b1"); global.UserData != "global" {
+		t.Errorf("没有账号级置备时应回落到全局: %+v", global)
 	}
 }
